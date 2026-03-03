@@ -266,6 +266,47 @@ export class IntaSendService {
     payment.status = 'PAID';
     payment.updatedAt = new Date().toISOString();
     await this.emails.sendPaymentReceipt(payment).catch(() => undefined);
+    if (String(payment?.type || '').toUpperCase() === 'SUBSCRIPTION' && payment?.payerEmail) {
+      await this.emails
+        .sendSubscriptionSuccess({
+          to: payment.payerEmail,
+          plan: payment?.plan || 'monthly',
+          amount: payment?.amount || 0,
+          currency: payment?.currency || 'KES',
+          locale: 'en',
+        })
+        .catch(() => undefined);
+    }
+
+    const recipientId = String(payment?.recipientId || '').trim();
+    if (recipientId) {
+      const recipientEmails = new Set<string>();
+      const recipientUser = await this.prisma.user
+        .findUnique({
+          where: { id: recipientId },
+          select: { email: true },
+        })
+        .catch(() => null);
+      if (recipientUser?.email) recipientEmails.add(recipientUser.email);
+      const recipientTenant = await this.prisma.tenant
+        .findUnique({
+          where: { id: recipientId },
+          select: { email: true },
+        })
+        .catch(() => null);
+      if (recipientTenant?.email) recipientEmails.add(recipientTenant.email);
+      await Promise.allSettled(
+        Array.from(recipientEmails).map((email) =>
+          this.emails.sendPaymentReceived({
+            to: email,
+            amount: payment?.amount || 0,
+            currency: payment?.currency || 'KES',
+            description: payment?.description || 'Payment',
+            locale: 'en',
+          }),
+        ),
+      );
+    }
 
     if (payment.type === 'SUBSCRIPTION') {
       InMemoryStore.create('subscriptions', {

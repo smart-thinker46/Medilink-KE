@@ -59,6 +59,58 @@ export class PaymentsController {
     });
   }
 
+  private async sendPaymentNotifications(payment: any) {
+    if (!payment) return;
+
+    await this.emails.sendPaymentReceipt(payment).catch(() => undefined);
+
+    if (String(payment?.type || '').toUpperCase() === 'SUBSCRIPTION' && payment?.payerEmail) {
+      await this.emails
+        .sendSubscriptionSuccess({
+          to: payment.payerEmail,
+          plan: payment?.plan || 'monthly',
+          amount: payment?.amount || 0,
+          currency: payment?.currency || 'KES',
+          locale: 'en',
+        })
+        .catch(() => undefined);
+    }
+
+    const recipientId = String(payment?.recipientId || '').trim();
+    if (!recipientId) return;
+
+    const recipientEmails = new Set<string>();
+    const recipientUser = await this.prisma.user
+      .findUnique({
+        where: { id: recipientId },
+        select: { email: true },
+      })
+      .catch(() => null);
+    if (recipientUser?.email) recipientEmails.add(recipientUser.email);
+
+    const recipientTenant = await this.prisma.tenant
+      .findUnique({
+        where: { id: recipientId },
+        select: { email: true },
+      })
+      .catch(() => null);
+    if (recipientTenant?.email) recipientEmails.add(recipientTenant.email);
+
+    if (recipientEmails.size === 0) return;
+
+    await Promise.allSettled(
+      Array.from(recipientEmails).map((email) =>
+        this.emails.sendPaymentReceived({
+          to: email,
+          amount: payment?.amount || 0,
+          currency: payment?.currency || 'KES',
+          description: payment?.description || 'Payment',
+          locale: 'en',
+        }),
+      ),
+    );
+  }
+
   private normalizeMoney(value: unknown) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : 0;
@@ -210,7 +262,7 @@ export class PaymentsController {
     if (this.canAutoMarkPaid(req)) {
       payment.status = 'PAID';
       payment.updatedAt = new Date().toISOString();
-      await this.emails.sendPaymentReceipt(payment).catch(() => undefined);
+      await this.sendPaymentNotifications(payment);
       if (payment.type === 'SUBSCRIPTION') {
         InMemoryStore.create('subscriptions', {
           userId: payment.userId,
@@ -337,7 +389,7 @@ export class PaymentsController {
       payment.mpesaReceiptNumber = `SANDBOX-${Math.random().toString(36).slice(2, 10)}`;
       payment.mpesaResultDesc = 'Sandbox: paid';
       payment.updatedAt = new Date().toISOString();
-      await this.emails.sendPaymentReceipt(payment).catch(() => undefined);
+      await this.sendPaymentNotifications(payment);
       if (payment.type === 'SUBSCRIPTION') {
         InMemoryStore.create('subscriptions', {
           userId: payment.userId,
@@ -506,7 +558,7 @@ export class PaymentsController {
       payment.status = 'PAID';
       payment.mpesaResultDesc = response?.ResultDesc || payment.mpesaResultDesc;
       payment.updatedAt = new Date().toISOString();
-      await this.emails.sendPaymentReceipt(payment).catch(() => undefined);
+      await this.sendPaymentNotifications(payment);
       if (payment.type === 'SUBSCRIPTION') {
         InMemoryStore.create('subscriptions', {
           userId: payment.userId,
@@ -550,7 +602,7 @@ export class PaymentsController {
           payment.status = 'PAID';
           payment.mpesaResultDesc = response?.ResultDesc || payment.mpesaResultDesc;
           payment.updatedAt = new Date().toISOString();
-          await this.emails.sendPaymentReceipt(payment).catch(() => undefined);
+          await this.sendPaymentNotifications(payment);
           if (payment.type === 'SUBSCRIPTION') {
             InMemoryStore.create('subscriptions', {
               userId: payment.userId,

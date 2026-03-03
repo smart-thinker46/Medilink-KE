@@ -395,6 +395,10 @@ export class AdminController {
   @Put('users/:id/block')
   async blockUser(@Param('id') id: string, @Body() body: any) {
     const blocked = body?.blocked ?? true;
+    const user = await this.prisma.user.findUnique({
+      where: { id },
+      select: { email: true, fullName: true },
+    });
     await mergeProfileExtras(this.prisma, id, {
       blocked: Boolean(blocked),
       blockedAt: blocked ? new Date().toISOString() : null,
@@ -418,6 +422,16 @@ export class AdminController {
       title: notification.title,
       message: notification.message,
     });
+    if (user?.email) {
+      await this.emails
+        .sendAccountStatusNotification({
+          to: user.email,
+          blocked: Boolean(blocked),
+          userName: user.fullName || 'User',
+          locale: body?.locale === 'sw' ? 'sw' : 'en',
+        })
+        .catch(() => undefined);
+    }
     InMemoryStore.logAudit({
       action: blocked ? 'USER_BLOCKED' : 'USER_UNBLOCKED',
       targetId: id,
@@ -696,6 +710,31 @@ export class AdminController {
       await mergeProfileExtras(this.prisma, updated.userId, {
         subscriptionActive: status === 'ACTIVE',
       });
+      const user = await this.prisma.user.findUnique({
+        where: { id: updated.userId },
+        select: { email: true },
+      });
+      if (user?.email) {
+        if (String(status).toUpperCase() === 'ACTIVE') {
+          await this.emails
+            .sendSubscriptionSuccess({
+              to: user.email,
+              plan: updated?.plan || 'monthly',
+              amount: Number(updated?.amount || 0),
+              currency: updated?.currency || 'KES',
+              locale: body?.locale === 'sw' ? 'sw' : 'en',
+            })
+            .catch(() => undefined);
+        } else {
+          await this.emails
+            .sendSubscriptionReminder({
+              to: user.email,
+              daysLeft: Number(body?.daysLeft || 0),
+              locale: body?.locale === 'sw' ? 'sw' : 'en',
+            })
+            .catch(() => undefined);
+        }
+      }
     }
     return updated;
   }

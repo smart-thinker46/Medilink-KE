@@ -264,15 +264,12 @@ export class OrdersController {
     if (pharmacy?.email) {
       const locale = ((await getProfileExtras(this.prisma, record.pharmacyId))?.language || 'en') as 'en' | 'sw';
       await this.emails
-        .sendTransactional({
+        .sendOrderReceived({
           to: pharmacy.email,
-          subject: this.emails.t(locale, 'new_order_title'),
-          html: this.emails.buildBrandedHtml({
-            title: this.emails.t(locale, 'new_order_title'),
-            body: `<p>${this.emails.t(locale, 'new_order_body')}</p><p>Total: ${record.currency} ${record.total}.</p>`,
-            locale,
-          }),
-          text: `${this.emails.t(locale, 'new_order_body')} Total: ${record.currency} ${record.total}.`,
+          orderId: record.id,
+          total: record.total,
+          currency: record.currency,
+          locale,
         })
         .catch(() => undefined);
     }

@@ -40,6 +40,18 @@ export class MedicsController {
     return Math.max(0, Math.min(100, Math.round(parsed)));
   }
 
+  private hasMedicalRecordGrant(extras: any, medicId?: string | null) {
+    if (!medicId) return false;
+    const grants = Array.isArray(extras?.medicalRecordAccessGrants)
+      ? extras.medicalRecordAccessGrants
+      : [];
+    return grants.some(
+      (grant: any) =>
+        String(grant?.medicId || '') === String(medicId) &&
+        grant?.active !== false,
+    );
+  }
+
   private async resolveMedicScope(req: any, requestedMedicId?: string) {
     const role = this.normalizeRole(req.user?.role);
     const actorId = String(req.user?.userId || '').trim();
@@ -88,17 +100,10 @@ export class MedicsController {
       throw new ForbiddenException('Not allowed to manage patient health status.');
     }
 
-    const hasRecord = await this.prisma.medicalRecord.findFirst({
-      where: { patientId, medicId: actorId },
-      select: { id: true },
-    });
-    const appointments = (InMemoryStore.list('appointments') as any[]) || [];
-    const hasAppointment = appointments.some(
-      (item: any) => item?.patientId === patientId && item?.medicId === actorId,
-    );
-    if (!hasRecord && !hasAppointment) {
+    const extras = await getProfileExtras(this.prisma, patientId);
+    if (!this.hasMedicalRecordGrant(extras, actorId)) {
       throw new ForbiddenException(
-        'You can only update health status for patients assigned to you.',
+        'Patient consent is required before viewing or updating health records.',
       );
     }
 
