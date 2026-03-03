@@ -1,0 +1,503 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  HOSPITAL_ADMIN
+  PHARMACY_ADMIN
+  MEDIC
+  PATIENT
+}
+
+enum TenantType {
+  HOSPITAL
+  PHARMACY
+}
+
+enum TenantStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  VERIFIED
+}
+
+enum SubscriptionTier {
+  BASIC
+  PREMIUM
+  ENTERPRISE
+}
+
+model User {
+  id              String    @id @default(uuid())
+  email           String    @unique
+  password        String
+  role            UserRole
+  isEmailVerified Boolean   @default(false)
+  phone           String?   @unique
+  fullName        String?
+  dateOfBirth     DateTime?
+  gender          String?
+  NationalIdPhotoUrl   String?
+  emergencyContactName String?
+  emergencyContactPhone String?
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  lastLogin       DateTime?
+  status          String    @default("active") // active, suspended
+
+  // Relations
+  tenants       TenantUser[]
+  auditLogs     AuditLog[]
+  sysAdmin      SystemAdmin?
+  medicProfile  Medic?
+  profile       UserProfile?
+  sentMessages      Message[]      @relation("MessageSender")
+  receivedMessages  Message[]      @relation("MessageRecipient")
+  patientRecords    MedicalRecord[] @relation("PatientRecords")
+  medicRecords      MedicalRecord[] @relation("MedicRecords")
+  
+  // Refresh Token for JWT
+  hashedRefreshToken String?
+
+  @@map("users")
+}
+
+model UserProfile {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  data      Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_profiles")
+}
+
+model Medic {
+  id               String   @id @default(uuid())
+  userId           String   @unique
+  licenseNumber    String   @unique
+  specialization   String
+  experienceYears  Int?
+  consultationFee  Decimal?
+  bio              String?
+  
+  user             User     @relation(fields: [userId], references: [id])
+  
+  @@map("medics")
+}
+
+model SystemAdmin {
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id])
+  @@map("system_admins")
+}
+
+model Tenant {
+  id                 String       @id @default(uuid())
+  name               String
+  type               TenantType
+  status             TenantStatus @default(PENDING)
+  dbUrl              String? // The distinct database URL for this tenant - auto-generated
+  registrationNumber String?
+  email              String?
+  phone              String?
+  logoUrl            String?
+  location           Json?
+  
+  subscriptionStatus String           @default("active")
+  subscriptionTier   SubscriptionTier @default(BASIC)
+  subscriptionEnd    DateTime?
+  
+  verifiedAt         DateTime?
+  verifiedBy         String? // Super Admin ID
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users          TenantUser[]
+  products       Product[]
+  stockMovements StockMovement[]
+
+  @@map("tenants")
+}
+
+model Product {
+  id                   String   @id @default(uuid())
+  pharmacyId           String
+  name                 String
+  productName          String
+  description          String?
+  category             String?
+  prescriptionRequired Boolean  @default(false)
+  requiresPrescription Boolean  @default(false)
+  quantity             Int      @default(0)
+  stock                Int      @default(0)
+  numberInStock        Int      @default(0)
+  price                Decimal  @default(0)
+  expiryDate           DateTime?
+  manufacturer         String?
+  batchNumber          String?
+  sku                  String?
+  barcode              String?
+  reorderLevel         Int      @default(5)
+  imageUrl             String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  pharmacy  Tenant          @relation(fields: [pharmacyId], references: [id], onDelete: Cascade)
+  movements StockMovement[]
+
+  @@index([pharmacyId])
+  @@index([name])
+  @@index([category])
+  @@index([sku])
+  @@index([barcode])
+  @@map("products")
+}
+
+model StockMovement {
+  id             String   @id @default(uuid())
+  pharmacyId     String
+  productId      String?
+  productName    String?
+  type           String
+  quantityChange Int      @default(0)
+  stockBefore    Int      @default(0)
+  stockAfter     Int      @default(0)
+  reason         String?
+  actorId        String?
+  createdAt      DateTime @default(now())
+
+  pharmacy Tenant   @relation(fields: [pharmacyId], references: [id], onDelete: Cascade)
+  product  Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([pharmacyId, createdAt])
+  @@index([productId, createdAt])
+  @@map("stock_movements")
+}
+
+model TenantUser {
+  id       String @id @default(uuid())
+  userId   String
+  tenantId String
+  role     UserRole // Role specific to this tenant (e.g., a doctor in Hospital A)
+  
+  user   User   @relation(fields: [userId], references: [id])
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  
+  isPrimary Boolean @default(false) // If user belongs to multiple, which is default
+
+  @@unique([userId, tenantId])
+  @@map("tenant_users")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  tenantId  String?
+  action    String
+  resource  String?
+  details   Json?
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  
+  user User? @relation(fields: [userId], references: [id])
+
+  @@map("audit_logs")
+}
+
+model MpesaTransaction {
+  id                String   @id @default(uuid())
+  transactionType   String
+  transID           String   @unique
+  transTime         String
+  transAmount       String
+  businessShortCode String
+  billRefNumber     String
+  invoiceNumber     String?
+  orgAccountBalance String?
+  thirdPartyTransID String?
+  msisdn            String
+  firstName         String?
+  middleName        String?
+  lastName          String?
+  createdAt         DateTime @default(now())
+  
+  tenantId          String? // If payment is for a specific tenant subscription
+  
+  @@map("mpesa_transactions")
+}
+
+model Message {
+  id          String   @id @default(uuid())
+  senderId    String
+  recipientId String
+  text        String
+  channel     String   @default("chat")
+  createdAt   DateTime @default(now())
+  deliveredAt DateTime?
+  readAt      DateTime?
+  hiddenForSender    Boolean @default(false)
+  hiddenForRecipient Boolean @default(false)
+  deletedForEveryone Boolean  @default(false)
+  deletedAt          DateTime?
+
+  sender    User @relation("MessageSender", fields: [senderId], references: [id])
+  recipient User @relation("MessageRecipient", fields: [recipientId], references: [id])
+
+  @@index([senderId])
+  @@index([recipientId])
+  @@map("messages")
+}
+
+model MedicalRecord {
+  id        String   @id @default(uuid())
+  patientId String
+  medicId   String?
+  type      String   @default("note")
+  notes     String?
+  condition String?
+  attachments Json?
+  createdAt DateTime @default(now())
+
+  patient User  @relation("PatientRecords", fields: [patientId], references: [id])
+  medic   User? @relation("MedicRecords", fields: [medicId], references: [id])
+
+  @@index([patientId])
+  @@index([medicId])
+  @@map("medical_records")
+}
+
+model Shift {
+  id                 String   @id @default(uuid())
+  title              String
+  description        String?
+  specifications     String?
+  specialization     String?
+  requiredMedics     Int      @default(0)
+  hours              Int      @default(0)
+  payType            String?
+  payAmount          Decimal? @default(0)
+  status             String   @default("OPEN")
+  createdBy          String
+  hospitalName       String?
+  location           String?
+  applications       Json?
+  cancellationReason String?
+  cancelledAt        DateTime?
+  cancelledBy        String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([createdBy])
+  @@index([status])
+  @@index([hospitalName])
+  @@index([specialization])
+  @@index([createdAt])
+  @@map("shifts")
+}
+
+model RolePermission {
+  id        String   @id @default(uuid())
+  matrix    Json
+  version   Int      @default(1)
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("role_permissions")
+}
+
+model KycReview {
+  id         String   @id @default(uuid())
+  userId     String
+  status     String
+  notes      String?
+  reviewedBy String?
+  reviewedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@map("kyc_reviews")
+}
+
+model FraudCase {
+  id        String   @id @default(uuid())
+  userId    String?
+  type      String
+  severity  String   @default("MEDIUM")
+  status    String   @default("OPEN")
+  details   Json?
+  notes     String?
+  createdBy String?
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([userId, createdAt])
+  @@map("fraud_cases")
+}
+
+model SupportTicket {
+  id          String   @id @default(uuid())
+  userId      String?
+  subject     String
+  description String?
+  priority    String   @default("MEDIUM")
+  status      String   @default("OPEN")
+  assignedTo  String?
+  createdBy   String?
+  updatedBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([assignedTo, createdAt])
+  @@map("support_tickets")
+}
+
+model ContentPolicy {
+  id          String   @id @default(uuid())
+  type        String
+  title       String
+  body        String
+  version     String
+  status      String   @default("DRAFT")
+  createdBy   String?
+  publishedBy String?
+  publishedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([type, version])
+  @@map("content_policies")
+}
+
+model PolicyAcceptance {
+  id         String   @id @default(uuid())
+  policyId   String
+  userId     String?
+  accepted   Boolean  @default(true)
+  acceptedAt DateTime @default(now())
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([policyId, acceptedAt])
+  @@index([userId, acceptedAt])
+  @@map("policy_acceptances")
+}
+
+model EmergencyIncident {
+  id        String   @id @default(uuid())
+  title     String
+  patientId String?
+  location  String?
+  severity  String   @default("HIGH")
+  status    String   @default("OPEN")
+  assignedTo String?
+  responders Json?
+  notes     String?
+  createdBy String?
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([severity, createdAt])
+  @@map("emergency_incidents")
+}
+
+model ComplianceRequest {
+  id          String   @id @default(uuid())
+  userId      String?
+  type        String
+  status      String   @default("OPEN")
+  reason      String?
+  requestedBy String?
+  updatedBy   String?
+  completedAt DateTime?
+  payload     Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([type, createdAt])
+  @@map("compliance_requests")
+}
+
+model FeatureFlag {
+  id        String   @id @default(uuid())
+  flags     Json
+  version   Int      @default(1)
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("feature_flags")
+}
+
+model PaymentDispute {
+  id        String   @id @default(uuid())
+  paymentId String?
+  orderId   String?
+  userId    String?
+  reason    String?
+  amount    Decimal  @default(0)
+  status    String   @default("OPEN")
+  createdBy String?
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([paymentId, createdAt])
+  @@index([orderId, createdAt])
+  @@map("payment_disputes")
+}
+
+model Refund {
+  id        String   @id @default(uuid())
+  disputeId String?
+  paymentId String?
+  userId    String?
+  amount    Decimal  @default(0)
+  reason    String?
+  status    String   @default("PENDING")
+  createdBy String?
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([disputeId, createdAt])
+  @@index([paymentId, createdAt])
+  @@map("refunds")
+}
+
+model PlatformHealthSnapshot {
+  id        String   @id @default(uuid())
+  api       Json?
+  database  Json?
+  payments  Json?
+  emails    Json?
+  videoCalls Json?
+  webhooks  Json?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("platform_health_snapshots")
+}
