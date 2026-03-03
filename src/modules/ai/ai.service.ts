@@ -296,13 +296,13 @@ export class AiService {
       extras?.subscriptionActive || extras?.premiumActive || extras?.isPremium,
     );
     const isPremium = isSuperAdmin || paidPremium;
-    const aiEnabled = Boolean(extras?.aiEnabled);
+    const aiEnabled = isSuperAdmin ? true : Boolean(extras?.aiEnabled);
     const providerIssue = this.aiUnavailableReason();
 
     let blockedReason: string | null = null;
     if (!isPremium) {
       blockedReason = 'AI is a premium feature. Activate a subscription first.';
-    } else if (!aiEnabled) {
+    } else if (!aiEnabled && !isSuperAdmin) {
       blockedReason = 'AI is disabled. Enable AI in Settings to use this feature.';
     } else if (providerIssue) {
       blockedReason = providerIssue;

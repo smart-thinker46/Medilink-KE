@@ -1,5 +1,7 @@
 import {
+  BadRequestException,
   Controller,
+  Delete,
   Get,
   Query,
   Put,
@@ -525,6 +527,77 @@ export class AdminController {
       by: req.user?.userId,
     });
     return { success: true, user };
+  }
+
+  @Delete('users/:id')
+  async deleteUser(@Req() req: any, @Param('id') id: string) {
+    const targetId = String(id || '').trim();
+    const requesterId = String(req?.user?.userId || '').trim();
+    if (!targetId) {
+      throw new BadRequestException('User id is required.');
+    }
+    if (!requesterId) {
+      throw new UnauthorizedException('Unauthenticated admin request.');
+    }
+    if (targetId === requesterId) {
+      throw new BadRequestException('You cannot delete your own admin account.');
+    }
+
+    const existing = await this.prisma.user.findUnique({
+      where: { id: targetId },
+      select: { id: true, role: true },
+    });
+    if (!existing) {
+      throw new BadRequestException('User not found.');
+    }
+
+    if (existing.role === UserRole.SUPER_ADMIN) {
+      const superAdminCount = await this.prisma.user.count({
+        where: { role: UserRole.SUPER_ADMIN },
+      });
+      if (superAdminCount <= 1) {
+        throw new BadRequestException('Cannot delete the last super admin account.');
+      }
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.auditLog.updateMany({
+        where: { userId: targetId },
+        data: { userId: null },
+      });
+      await tx.tenantUser.deleteMany({ where: { userId: targetId } });
+      await tx.message.deleteMany({
+        where: {
+          OR: [{ senderId: targetId }, { recipientId: targetId }],
+        },
+      });
+      await tx.medicalRecord.updateMany({
+        where: { medicId: targetId },
+        data: { medicId: null },
+      });
+      await tx.medicalRecord.deleteMany({ where: { patientId: targetId } });
+      await tx.userProfile.deleteMany({ where: { userId: targetId } });
+
+      const txAny = tx as any;
+      if (txAny?.medic?.deleteMany) {
+        await txAny.medic.deleteMany({ where: { userId: targetId } });
+      }
+      if (txAny?.systemAdmin?.deleteMany) {
+        await txAny.systemAdmin.deleteMany({ where: { userId: targetId } });
+      }
+
+      await tx.user.delete({ where: { id: targetId } });
+    });
+
+    this.pruneInMemoryUserData(targetId);
+    InMemoryStore.logAudit({
+      action: 'ADMIN_USER_DELETED',
+      targetId,
+      by: requesterId,
+      createdAt: new Date().toISOString(),
+    });
+
+    return { success: true, deletedUserId: targetId };
   }
 
   @Put('users/:id/verify')
@@ -1079,6 +1152,48 @@ export class AdminController {
       }
       throw error;
     }
+  }
+
+  private pruneInMemoryUserData(userId: string) {
+    const collectionRules: Array<{ collection: string; keys: string[] }> = [
+      { collection: 'appointments', keys: ['userId', 'patientId', 'medicId'] },
+      { collection: 'orders', keys: ['userId', 'patientId', 'buyerId', 'createdBy'] },
+      { collection: 'payments', keys: ['userId', 'recipientId', 'payerId', 'patientId'] },
+      { collection: 'notifications', keys: ['userId'] },
+      { collection: 'videoCalls', keys: ['callerId', 'calleeId', 'userId'] },
+      { collection: 'medicApprovals', keys: ['userId', 'medicId', 'approvedBy'] },
+      { collection: 'medicHires', keys: ['medicId', 'patientId', 'hospitalAdminId', 'hiredBy'] },
+      { collection: 'complaints', keys: ['userId', 'patientId', 'assignedTo'] },
+      { collection: 'subscriptions', keys: ['userId'] },
+      { collection: 'adminNotifications', keys: ['userId', 'createdBy'] },
+      { collection: 'messages', keys: ['userId', 'senderId', 'recipientId', 'createdBy'] },
+      { collection: 'emails', keys: ['userId', 'toUserId', 'createdBy'] },
+      { collection: 'supportChatRequests', keys: ['requesterId', 'adminId', 'userId'] },
+      { collection: 'aiVoiceSessions', keys: ['userId'] },
+      { collection: 'aiVoiceEvents', keys: ['userId'] },
+      { collection: 'aiToolAudits', keys: ['userId'] },
+      { collection: 'purchaseOrders', keys: ['createdBy', 'approvedBy'] },
+      { collection: 'fraudCases', keys: ['userId', 'createdBy', 'updatedBy'] },
+      { collection: 'supportTickets', keys: ['userId', 'createdBy', 'assignedTo', 'resolvedBy'] },
+      { collection: 'policyAcceptances', keys: ['userId'] },
+      { collection: 'emergencyIncidents', keys: ['patientId', 'createdBy', 'updatedBy', 'assignedTo'] },
+      { collection: 'complianceRequests', keys: ['userId', 'requestedBy', 'updatedBy'] },
+      { collection: 'paymentDisputes', keys: ['userId', 'createdBy', 'updatedBy'] },
+      { collection: 'refunds', keys: ['userId', 'createdBy'] },
+      { collection: 'withdrawals', keys: ['ownerId', 'requestedBy'] },
+    ];
+
+    collectionRules.forEach(({ collection, keys }) => {
+      const rows = InMemoryStore.list(collection as any) as any[];
+      if (!Array.isArray(rows) || rows.length === 0) return;
+      for (let index = rows.length - 1; index >= 0; index -= 1) {
+        const row = rows[index] || {};
+        const shouldRemove = keys.some((key) => String(row?.[key] || '').trim() === userId);
+        if (shouldRemove) {
+          rows.splice(index, 1);
+        }
+      }
+    });
   }
 
   private async ensureSingleton(collection: string, defaults: Record<string, any>) {
