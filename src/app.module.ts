@@ -49,10 +49,30 @@ import { SubscriptionAccessInterceptor } from './common/subscription-access.inte
     BullModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
-        connection: {
-          host: config.get('REDIS_HOST'),
-          port: config.get('REDIS_PORT'),
-        },
+        ...(function () {
+          const redisUrl = String(config.get('REDIS_URL') || '').trim();
+          if (redisUrl) {
+            try {
+              const parsed = new URL(redisUrl);
+              return {
+                connection: {
+                  host: parsed.hostname,
+                  port: Number(parsed.port || 6379),
+                  username: parsed.username || undefined,
+                  password: parsed.password || undefined,
+                },
+              };
+            } catch {
+              // Fall back to REDIS_HOST/REDIS_PORT when REDIS_URL is invalid.
+            }
+          }
+          return {
+            connection: {
+              host: config.get('REDIS_HOST'),
+              port: Number(config.get('REDIS_PORT')),
+            },
+          };
+        })(),
       }),
     }),
     AuthModule,
