@@ -8,7 +8,7 @@ services:
     runtime: node
     plan: free
     region: frankfurt
-    rootDir: Medilink-Backend
+    rootDir: .
     buildCommand: npm install && npx prisma generate --schema prisma/main.schema.prisma && npm run build
     preDeployCommand: npx prisma migrate deploy --schema prisma/main.schema.prisma
     startCommand: npm run start:prod
