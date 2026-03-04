@@ -37,6 +37,11 @@ export class EmailsService {
     return this.config.get<string>('RESEND_FROM') || 'info@medilinkkenya.com';
   }
 
+  private get requestTimeoutMs() {
+    const raw = Number(this.config.get<string>('EMAIL_REQUEST_TIMEOUT_MS') || 8000);
+    return Number.isFinite(raw) && raw > 0 ? raw : 8000;
+  }
+
   buildBrandedHtml(options: {
     title: string;
     body: string;
@@ -117,6 +122,7 @@ export class EmailsService {
           Authorization: `Bearer ${this.apiKey}`,
           'Content-Type': 'application/json',
         },
+        timeout: this.requestTimeoutMs,
       },
     );
     return response.data;

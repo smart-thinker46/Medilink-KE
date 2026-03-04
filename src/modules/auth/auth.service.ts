@@ -109,7 +109,8 @@ export class AuthService {
       const token = await this.signToken(user.id, user.email, user.role, tenant?.id, tenant?.type);
       const extras = await getProfileExtras(tx, user.id);
       const locale = (extras?.language || 'en') as 'en' | 'sw';
-      await this.emails
+      // Never block account creation on external email provider latency/failures.
+      void this.emails
         .sendTransactional({
           to: user.email,
           subject: this.emails.t(locale, 'welcome_title'),
