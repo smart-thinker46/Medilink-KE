@@ -50,7 +50,17 @@ import { SubscriptionAccessInterceptor } from './common/subscription-access.inte
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
         ...(function () {
-          const redisUrl = String(config.get('REDIS_URL') || '').trim();
+          const redisUrlRaw = String(config.get('REDIS_URL') || '').trim();
+          const redisUrl = (() => {
+            if (!redisUrlRaw) return '';
+            // Accept accidentally pasted CLI commands like:
+            // "redis-cli -u redis://default:pass@host:port"
+            const redissIndex = redisUrlRaw.indexOf('rediss://');
+            if (redissIndex >= 0) return redisUrlRaw.slice(redissIndex).trim();
+            const redisIndex = redisUrlRaw.indexOf('redis://');
+            if (redisIndex >= 0) return redisUrlRaw.slice(redisIndex).trim();
+            return redisUrlRaw;
+          })();
           if (redisUrl) {
             try {
               const parsed = new URL(redisUrl);
@@ -64,7 +74,9 @@ import { SubscriptionAccessInterceptor } from './common/subscription-access.inte
                 },
               };
             } catch {
-              // Fall back to REDIS_HOST/REDIS_PORT when REDIS_URL is invalid.
+              console.warn(
+                '[Redis] Invalid REDIS_URL format. Falling back to REDIS_HOST/REDIS_PORT.',
+              );
             }
           }
           const redisHostRaw = String(config.get('REDIS_HOST') || '').trim();
