@@ -9,6 +9,11 @@ import { InMemoryStore } from 'src/common/in-memory.store';
 import { getProfileExtras } from 'src/common/profile-extras';
 import { EmailsService } from '../emails/emails.service';
 import { randomUUID } from 'crypto';
+import {
+  computePasswordExpiryDate,
+  isPasswordExpired,
+  normalizePasswordIntervalDays,
+} from 'src/common/security/password-policy';
 
 @Injectable()
 export class AuthService {
@@ -142,6 +147,9 @@ export class AuthService {
     if (extras?.blocked) throw new UnauthorizedException('Account suspended');
 
     if (user.status !== 'active') throw new UnauthorizedException('Account suspended');
+    if (isPasswordExpired(user.passwordExpiresAt)) {
+      throw new UnauthorizedException('Password expired. Please reset your password.');
+    }
 
     // Determine Tenant Context
     // If tenantId provided, verify user belongs to it
@@ -177,6 +185,11 @@ export class AuthService {
         fullName: user.fullName,
         status: user.status,
         blocked: Boolean(extras?.blocked),
+        passwordPolicy: {
+          intervalDays: user.passwordUpdateIntervalDays || null,
+          expiresAt: user.passwordExpiresAt || null,
+          expired: false,
+        },
       },
       tenantId, 
     };
@@ -236,17 +249,30 @@ export class AuthService {
     if (!record || record.expiresAt < Date.now()) {
       throw new BadRequestException('Reset token is invalid or expired');
     }
+    const user = await this.prisma.user.findUnique({
+      where: { id: record.userId },
+      select: { id: true, email: true, passwordUpdateIntervalDays: true },
+    });
+    if (!user) throw new BadRequestException('User account not found');
+
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(newPassword, salt);
+    const changedAt = new Date();
+    const intervalDays = normalizePasswordIntervalDays(user.passwordUpdateIntervalDays);
+    const expiresAt = computePasswordExpiryDate(intervalDays, changedAt);
     await this.prisma.user.update({
-      where: { id: record.userId },
-      data: { password: hashedPassword },
+      where: { id: user.id },
+      data: {
+        password: hashedPassword,
+        passwordChangedAt: changedAt,
+        passwordExpiresAt: expiresAt,
+      },
     });
     InMemoryStore.remove('passwordResets', record.id);
-    const localeChanged = ((await getProfileExtras(this.prisma, record.userId))?.language || 'en') as 'en' | 'sw';
+    const localeChanged = ((await getProfileExtras(this.prisma, user.id))?.language || 'en') as 'en' | 'sw';
     await this.emails
       .sendTransactional({
-        to: record.email,
+        to: user.email,
         subject: this.emails.t(localeChanged, 'password_changed_title'),
         html: this.emails.buildBrandedHtml({
           title: this.emails.t(localeChanged, 'password_changed_title'),

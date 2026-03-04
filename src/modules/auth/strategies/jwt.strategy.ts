@@ -4,6 +4,7 @@ import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from 'src/database/prisma.service';
+import { isPasswordExpired } from 'src/common/security/password-policy';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -24,6 +25,11 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     // Optional: Verify user exists in DB (adds latency but more secure)
     const user = await this.prisma.user.findUnique({
       where: { id: payload.sub },
+      select: {
+        id: true,
+        status: true,
+        passwordExpiresAt: true,
+      },
     });
 
     if (!user) {
@@ -32,6 +38,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 
     if (user.status !== 'active') {
       throw new UnauthorizedException('User is suspended');
+    }
+    if (isPasswordExpired(user.passwordExpiresAt)) {
+      throw new UnauthorizedException('Password expired. Please reset your password.');
     }
 
     // Return the user object enriched with payload data for the Request object

@@ -49,6 +49,7 @@ async function main() {
         fullName: existing.fullName || fullName,
         phone: existing.phone || phone || undefined,
         password: hashed,
+        passwordChangedAt: new Date(),
         isEmailVerified: true,
       },
     });
@@ -69,6 +70,7 @@ async function main() {
       fullName,
       phone: phone || undefined,
       isEmailVerified: true,
+      passwordChangedAt: new Date(),
     },
   });
 

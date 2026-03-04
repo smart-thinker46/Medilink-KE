@@ -86,6 +86,7 @@ function fakeUrl(kind, id) {
 }
 
 async function upsertUser({ email, role, phone, fullName, gender, dateOfBirth }) {
+  const passwordChangedAt = new Date();
   const password = await bcrypt.hash(SHARED_PASSWORD, 10);
   const user = await prisma.user.upsert({
     where: { email: email.toLowerCase() },
@@ -96,6 +97,7 @@ async function upsertUser({ email, role, phone, fullName, gender, dateOfBirth })
       gender,
       dateOfBirth,
       password,
+      passwordChangedAt,
       isEmailVerified: true,
       status: 'active',
     },
@@ -107,6 +109,7 @@ async function upsertUser({ email, role, phone, fullName, gender, dateOfBirth })
       gender,
       dateOfBirth,
       password,
+      passwordChangedAt,
       isEmailVerified: true,
       status: 'active',
     },

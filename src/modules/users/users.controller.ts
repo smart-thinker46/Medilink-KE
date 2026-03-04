@@ -16,6 +16,14 @@ import { PrismaService } from 'src/database/prisma.service';
 import { InMemoryStore } from 'src/common/in-memory.store';
 import { getProfileExtras, getProfileExtrasMap, mergeProfileExtras } from 'src/common/profile-extras';
 import { randomUUID } from 'crypto';
+import * as bcrypt from 'bcrypt';
+import {
+  ALLOWED_PASSWORD_INTERVAL_DAYS,
+  computePasswordExpiryDate,
+  getPasswordDaysRemaining,
+  isPasswordExpired,
+  normalizePasswordIntervalDays,
+} from 'src/common/security/password-policy';
 
 @Controller('users')
 @UseGuards(AuthGuard('jwt'))
@@ -321,6 +329,11 @@ export class UsersController {
         gender: user.gender,
         emergencyContactName: user.emergencyContactName,
         emergencyContactPhone: user.emergencyContactPhone,
+        passwordChangedAt: user.passwordChangedAt,
+        passwordUpdateIntervalDays: user.passwordUpdateIntervalDays || null,
+        passwordExpiresAt: user.passwordExpiresAt || null,
+        passwordExpired: isPasswordExpired(user.passwordExpiresAt),
+        passwordDaysRemaining: getPasswordDaysRemaining(user.passwordExpiresAt),
         medicProfile: user.medicProfile,
         tenants: user.tenants?.map((t) => t.tenant) || [],
         ...extras,
@@ -924,6 +937,99 @@ export class UsersController {
     return {
       ...user,
       avatarUrl: extras.profilePhoto || extras.avatarUrl || null,
+    };
+  }
+
+  @Put('security/password-policy')
+  async updatePasswordPolicy(@Req() req: any, @Body() body: any) {
+    const userId = String(req.user?.userId || '').trim();
+    if (!userId) throw new BadRequestException('Invalid user session.');
+
+    const rawInterval = body?.passwordUpdateIntervalDays ?? body?.intervalDays ?? null;
+    const intervalDays = normalizePasswordIntervalDays(rawInterval);
+
+    const shouldDisable =
+      rawInterval === null ||
+      rawInterval === undefined ||
+      rawInterval === '' ||
+      Number(rawInterval) === 0;
+    if (!shouldDisable && intervalDays === null) {
+      throw new BadRequestException(
+        `Invalid interval. Allowed values: ${ALLOWED_PASSWORD_INTERVAL_DAYS.join(', ')} days, or 0 to disable.`,
+      );
+    }
+
+    const now = new Date();
+    const passwordExpiresAt = computePasswordExpiryDate(intervalDays, now);
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        passwordUpdateIntervalDays: intervalDays,
+        passwordExpiresAt,
+      },
+    });
+
+    return {
+      success: true,
+      passwordPolicy: {
+        intervalDays,
+        expiresAt: passwordExpiresAt,
+        daysRemaining: getPasswordDaysRemaining(passwordExpiresAt),
+      },
+    };
+  }
+
+  @Put('security/password')
+  async changePassword(@Req() req: any, @Body() body: any) {
+    const userId = String(req.user?.userId || '').trim();
+    if (!userId) throw new BadRequestException('Invalid user session.');
+
+    const currentPassword = String(body?.currentPassword || '');
+    const newPassword = String(body?.newPassword || '');
+    if (!currentPassword || !newPassword) {
+      throw new BadRequestException('Current password and new password are required.');
+    }
+    if (newPassword.length < 8) {
+      throw new BadRequestException('New password must be at least 8 characters long.');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        password: true,
+        passwordUpdateIntervalDays: true,
+      },
+    });
+    if (!user) throw new BadRequestException('User account not found.');
+
+    const validCurrent = await bcrypt.compare(currentPassword, user.password);
+    if (!validCurrent) {
+      throw new BadRequestException('Current password is incorrect.');
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(newPassword, salt);
+    const changedAt = new Date();
+    const intervalDays = normalizePasswordIntervalDays(user.passwordUpdateIntervalDays);
+    const passwordExpiresAt = computePasswordExpiryDate(intervalDays, changedAt);
+
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        password: hashedPassword,
+        passwordChangedAt: changedAt,
+        passwordExpiresAt,
+      },
+    });
+
+    return {
+      success: true,
+      passwordPolicy: {
+        intervalDays,
+        expiresAt: passwordExpiresAt,
+        daysRemaining: getPasswordDaysRemaining(passwordExpiresAt),
+      },
     };
   }
 

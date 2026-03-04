@@ -29,8 +29,18 @@ export class AuthController {
     return this.authService.requestPasswordReset(body.email);
   }
 
+  @Post('forgot-password')
+  async forgotPasswordAlias(@Body() body: { email: string }) {
+    return this.authService.requestPasswordReset(body.email);
+  }
+
   @Post('password/reset')
   async resetPassword(@Body() body: { token: string; password: string }) {
+    return this.authService.resetPassword(body.token, body.password);
+  }
+
+  @Post('reset-password')
+  async resetPasswordAlias(@Body() body: { token: string; password: string }) {
     return this.authService.resetPassword(body.token, body.password);
   }
 }
