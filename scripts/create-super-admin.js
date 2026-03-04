@@ -48,7 +48,7 @@ async function main() {
         role: "SUPER_ADMIN",
         fullName: existing.fullName || fullName,
         phone: existing.phone || phone || undefined,
-        password: existing.password || hashed,
+        password: hashed,
         isEmailVerified: true,
       },
     });

@@ -60,16 +60,42 @@ import { SubscriptionAccessInterceptor } from './common/subscription-access.inte
                   port: Number(parsed.port || 6379),
                   username: parsed.username || undefined,
                   password: parsed.password || undefined,
+                  ...(parsed.protocol === 'rediss:' ? { tls: {} } : {}),
                 },
               };
             } catch {
               // Fall back to REDIS_HOST/REDIS_PORT when REDIS_URL is invalid.
             }
           }
+          const redisHostRaw = String(config.get('REDIS_HOST') || '').trim();
+          const redisPassword = String(config.get('REDIS_PASSWORD') || '').trim();
+          const redisUsername = String(config.get('REDIS_USERNAME') || '').trim();
+          const redisTls = String(config.get('REDIS_TLS') || 'false') === 'true';
+
+          if (redisHostRaw.startsWith('redis://') || redisHostRaw.startsWith('rediss://')) {
+            try {
+              const parsed = new URL(redisHostRaw);
+              return {
+                connection: {
+                  host: parsed.hostname,
+                  port: Number(parsed.port || config.get('REDIS_PORT') || 6379),
+                  username: parsed.username || redisUsername || undefined,
+                  password: parsed.password || redisPassword || undefined,
+                  ...(parsed.protocol === 'rediss:' || redisTls ? { tls: {} } : {}),
+                },
+              };
+            } catch {
+              // Fall through to plain host/port config below.
+            }
+          }
+
           return {
             connection: {
-              host: config.get('REDIS_HOST'),
-              port: Number(config.get('REDIS_PORT')),
+              host: redisHostRaw || config.get('REDIS_HOST'),
+              port: Number(config.get('REDIS_PORT') || 6379),
+              username: redisUsername || undefined,
+              password: redisPassword || undefined,
+              ...(redisTls ? { tls: {} } : {}),
             },
           };
         })(),

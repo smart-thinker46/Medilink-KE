@@ -24,24 +24,54 @@ const prisma = new PrismaClient();
 const SHARED_PASSWORD = process.env.TEST_SEED_PASSWORD || 'Medilink@123';
 const SEED_TAG = 'seed-demo-v1';
 const TARGET_COUNTS = {
-  patients: 20,
-  medics: 10,
-  pharmacies: 10,
-  hospitals: 5,
+  patients: Number(process.env.SEED_PATIENTS || 10),
+  medics: Number(process.env.SEED_MEDICS || 10),
+  pharmacies: Number(process.env.SEED_PHARMACIES || 10),
+  hospitals: Number(process.env.SEED_HOSPITALS || 10),
 };
 
 const counties = ['Nairobi', 'Kiambu', 'Mombasa', 'Nakuru', 'Kisumu'];
-const medicSpecializations = [
-  'Cardiology',
-  'Pediatrics',
-  'Orthopedics',
-  'Dermatology',
-  'Neurology',
-  'Oncology',
-  'Gynecology',
-  'Psychiatry',
-  'Ophthalmology',
-  'ENT',
+const medicProfiles = [
+  { titlePrefix: 'Dr', professionalType: 'Doctor', specialization: 'General Medicine' },
+  { titlePrefix: 'Nurse', professionalType: 'Nurse', specialization: 'Critical Care Nursing' },
+  { titlePrefix: 'Dr', professionalType: 'Dentist', specialization: 'Dentistry' },
+  { titlePrefix: 'Officer', professionalType: 'Clinical Officer', specialization: 'Clinical Practice' },
+  { titlePrefix: 'Tech', professionalType: 'Lab Technologist', specialization: 'Laboratory Medicine' },
+  { titlePrefix: 'Physio', professionalType: 'Physiotherapist', specialization: 'Physiotherapy' },
+  { titlePrefix: 'Counselor', professionalType: 'Psychologist', specialization: 'Mental Health' },
+  { titlePrefix: 'Nutritionist', professionalType: 'Nutritionist', specialization: 'Clinical Nutrition' },
+  { titlePrefix: 'Pharmacist', professionalType: 'Pharmacist', specialization: 'Pharmacotherapy' },
+  { titlePrefix: 'Imaging', professionalType: 'Radiographer', specialization: 'Diagnostic Imaging' },
+];
+
+const PHARMACY_CATALOG = [
+  { name: 'Paracetamol 500mg', category: 'Pain Relief', price: 120, prescriptionRequired: false, stock: 75 },
+  { name: 'Amoxicillin 500mg', category: 'Antibiotics', price: 360, prescriptionRequired: true, stock: 48 },
+  { name: 'Cetirizine 10mg', category: 'Allergy', price: 150, prescriptionRequired: false, stock: 52 },
+  { name: 'Metformin 500mg', category: 'Diabetes', price: 320, prescriptionRequired: true, stock: 45 },
+  { name: 'Omeprazole 20mg', category: 'Gastro', price: 280, prescriptionRequired: false, stock: 40 },
+  { name: 'Losartan 50mg', category: 'Hypertension', price: 400, prescriptionRequired: true, stock: 38 },
+  { name: 'Insulin Pen 3ml', category: 'Diabetes', price: 1350, prescriptionRequired: true, stock: 28 },
+  { name: 'Salbutamol Inhaler', category: 'Respiratory', price: 540, prescriptionRequired: true, stock: 33 },
+  { name: 'Vitamin C 1000mg', category: 'Supplements', price: 220, prescriptionRequired: false, stock: 60 },
+  { name: 'Ibuprofen 400mg', category: 'Pain Relief', price: 180, prescriptionRequired: false, stock: 55 },
+  { name: 'ORS Sachets', category: 'Rehydration', price: 70, prescriptionRequired: false, stock: 65 },
+  { name: 'Azithromycin 250mg', category: 'Antibiotics', price: 680, prescriptionRequired: true, stock: 30 },
+];
+
+const HOSPITAL_INVENTORY_CATALOG = [
+  { name: 'Paracetamol 1g IV', category: 'Medication', price: 260, prescriptionRequired: true, stock: 40 },
+  { name: 'Ceftriaxone 1g', category: 'Medication', price: 420, prescriptionRequired: true, stock: 36 },
+  { name: 'Normal Saline 500ml', category: 'Fluids', price: 180, prescriptionRequired: false, stock: 80 },
+  { name: 'Dextrose 5% 500ml', category: 'Fluids', price: 210, prescriptionRequired: false, stock: 74 },
+  { name: 'Sterile Syringe 10ml', category: 'Consumables', price: 35, prescriptionRequired: false, stock: 260 },
+  { name: 'Examination Gloves (Box)', category: 'Consumables', price: 690, prescriptionRequired: false, stock: 58 },
+  { name: 'Surgical Mask (Box)', category: 'PPE', price: 540, prescriptionRequired: false, stock: 66 },
+  { name: 'Rapid Malaria Test Kit', category: 'Diagnostics', price: 140, prescriptionRequired: false, stock: 90 },
+  { name: 'Pregnancy Test Kit', category: 'Diagnostics', price: 110, prescriptionRequired: false, stock: 70 },
+  { name: 'Wound Dressing Pack', category: 'Consumables', price: 280, prescriptionRequired: false, stock: 48 },
+  { name: 'Hydrocortisone Cream', category: 'Dermatology', price: 260, prescriptionRequired: false, stock: 44 },
+  { name: 'Nebulizer Set', category: 'Equipment', price: 1950, prescriptionRequired: false, stock: 18 },
 ];
 
 function isoDate(year, month, day) {
@@ -49,6 +79,9 @@ function isoDate(year, month, day) {
 }
 
 function fakeUrl(kind, id) {
+  if (kind === 'product') {
+    return `https://picsum.photos/seed/medilink-${encodeURIComponent(String(id))}/640/480`;
+  }
   return `https://example.com/${kind}/${id}.jpg`;
 }
 
@@ -93,8 +126,9 @@ async function upsertProfile(userId, data) {
 }
 
 async function upsertMedicProfile(user, index) {
+  const profile = medicProfiles[index % medicProfiles.length];
   const licenseNumber = `MED-LIC-${10000 + index}`;
-  const specialization = medicSpecializations[index % medicSpecializations.length];
+  const specialization = profile.specialization;
   await prisma.medic.upsert({
     where: { userId: user.id },
     update: {
@@ -122,7 +156,7 @@ async function upsertMedicProfile(user, index) {
     email: user.email,
     dateOfBirth: user.dateOfBirth,
     gender: user.gender || 'Male',
-    professionalType: 'Nurse',
+    professionalType: profile.professionalType,
     specialization,
     licenseNumber,
     institution: 'University of Nairobi',
@@ -290,6 +324,8 @@ async function upsertHospitalAdmin(user, index) {
     [SEED_TAG]: true,
   });
 
+  await ensureHospitalCatalog(tenant, user.id, index);
+
   return tenant;
 }
 
@@ -373,105 +409,46 @@ async function upsertPharmacyAdmin(user, index) {
     [SEED_TAG]: true,
   });
 
-  const catalog = [
-    { name: 'Paracetamol 500mg', category: 'Pain Relief', price: 120, prescriptionRequired: false },
-    { name: 'Amoxicillin 500mg', category: 'Antibiotics', price: 360, prescriptionRequired: true },
-    { name: 'Cetirizine 10mg', category: 'Allergy', price: 150, prescriptionRequired: false },
-    { name: 'Metformin 500mg', category: 'Diabetes', price: 320, prescriptionRequired: true },
-    { name: 'Omeprazole 20mg', category: 'Gastro', price: 280, prescriptionRequired: false },
-    { name: 'Losartan 50mg', category: 'Hypertension', price: 400, prescriptionRequired: true },
-  ];
-
-  for (let i = 0; i < catalog.length; i += 1) {
-    const entry = catalog[i];
-    const sku = `SKU-P${index + 1}-${i + 1}`;
-    const existingProduct = await prisma.product.findFirst({
-      where: { pharmacyId: tenant.id, sku },
-    });
-
-    const stock = 20 + i * 7;
-    const data = {
-      pharmacyId: tenant.id,
-      name: entry.name,
-      productName: entry.name,
-      description: `Seeded product (${SEED_TAG})`,
-      category: entry.category,
-      prescriptionRequired: entry.prescriptionRequired,
-      requiresPrescription: entry.prescriptionRequired,
-      quantity: stock,
-      stock,
-      numberInStock: stock,
-      price: entry.price,
-      expiryDate: isoDate(2027, (i % 12) + 1, 20),
-      manufacturer: 'Test Pharma Ltd',
-      batchNumber: `BATCH-${index + 1}-${i + 1}`,
-      sku,
-      barcode: `BAR-${index + 1}-${i + 1}`,
-      reorderLevel: 6,
-      imageUrl: fakeUrl('product', `${index + 1}-${i + 1}`),
-    };
-
-    let product;
-    if (existingProduct) {
-      product = await prisma.product.update({ where: { id: existingProduct.id }, data });
-    } else {
-      product = await prisma.product.create({ data });
-      await prisma.stockMovement.create({
-        data: {
-          pharmacyId: tenant.id,
-          productId: product.id,
-          productName: product.name,
-          type: 'CREATED',
-          quantityChange: stock,
-          stockBefore: 0,
-          stockAfter: stock,
-          reason: `Initial seed (${SEED_TAG})`,
-          actorId: user.id,
-        },
-      });
-    }
-  }
+  await ensurePharmacyCatalog(tenant, user.id, index);
 
   return tenant;
 }
 
-async function ensurePharmacyCatalog(tenant, actorUserId, indexSeed = 0) {
-  const catalog = [
-    { name: 'Paracetamol 500mg', category: 'Pain Relief', price: 120, prescriptionRequired: false },
-    { name: 'Amoxicillin 500mg', category: 'Antibiotics', price: 360, prescriptionRequired: true },
-    { name: 'Cetirizine 10mg', category: 'Allergy', price: 150, prescriptionRequired: false },
-    { name: 'Metformin 500mg', category: 'Diabetes', price: 320, prescriptionRequired: true },
-    { name: 'Omeprazole 20mg', category: 'Gastro', price: 280, prescriptionRequired: false },
-    { name: 'Losartan 50mg', category: 'Hypertension', price: 400, prescriptionRequired: true },
-  ];
-
+async function ensureTenantCatalog({
+  tenant,
+  actorUserId,
+  indexSeed = 0,
+  catalog,
+  skuPrefix,
+  manufacturer,
+}) {
   for (let i = 0; i < catalog.length; i += 1) {
     const entry = catalog[i];
-    const sku = `SKU-${tenant.id.slice(0, 6)}-${i + 1}`;
+    const sku = `${skuPrefix}-${tenant.id.slice(0, 6)}-${i + 1}`;
     const existingProduct = await prisma.product.findFirst({
       where: { pharmacyId: tenant.id, sku },
     });
 
-    const stock = 20 + i * 7 + indexSeed;
+    const stock = Number(entry.stock || 20 + i * 7 + indexSeed);
     const data = {
       pharmacyId: tenant.id,
       name: entry.name,
       productName: entry.name,
       description: `Seeded product (${SEED_TAG})`,
       category: entry.category,
-      prescriptionRequired: entry.prescriptionRequired,
-      requiresPrescription: entry.prescriptionRequired,
+      prescriptionRequired: Boolean(entry.prescriptionRequired),
+      requiresPrescription: Boolean(entry.prescriptionRequired),
       quantity: stock,
       stock,
       numberInStock: stock,
       price: entry.price,
       expiryDate: isoDate(2027, (i % 12) + 1, 20),
-      manufacturer: 'Test Pharma Ltd',
-      batchNumber: `BATCH-${tenant.id.slice(0, 6)}-${i + 1}`,
-      sku,
-      barcode: `BAR-${tenant.id.slice(0, 6)}-${i + 1}`,
+      manufacturer: manufacturer || 'Test Pharma Ltd',
+      batchNumber: `BATCH-${skuPrefix}-${tenant.id.slice(0, 6)}-${i + 1}`,
+      sku: sku.toUpperCase(),
+      barcode: `BAR-${skuPrefix}-${tenant.id.slice(0, 6)}-${i + 1}`,
       reorderLevel: 6,
-      imageUrl: fakeUrl('product', `${tenant.id.slice(0, 6)}-${i + 1}`),
+      imageUrl: fakeUrl('product', `${skuPrefix}-${tenant.id.slice(0, 6)}-${i + 1}`),
     };
 
     let product;
@@ -496,6 +473,28 @@ async function ensurePharmacyCatalog(tenant, actorUserId, indexSeed = 0) {
   }
 }
 
+async function ensurePharmacyCatalog(tenant, actorUserId, indexSeed = 0) {
+  await ensureTenantCatalog({
+    tenant,
+    actorUserId,
+    indexSeed,
+    catalog: PHARMACY_CATALOG,
+    skuPrefix: 'PHA',
+    manufacturer: 'MediLink Pharma Supply',
+  });
+}
+
+async function ensureHospitalCatalog(tenant, actorUserId, indexSeed = 0) {
+  await ensureTenantCatalog({
+    tenant,
+    actorUserId,
+    indexSeed,
+    catalog: HOSPITAL_INVENTORY_CATALOG,
+    skuPrefix: 'HSP',
+    manufacturer: 'MediLink Hospital Supply',
+  });
+}
+
 async function backfillAllPharmacyCatalog() {
   const pharmacies = await prisma.tenant.findMany({
     where: { type: 'PHARMACY' },
@@ -509,7 +508,22 @@ async function backfillAllPharmacyCatalog() {
   }
 }
 
+async function backfillAllHospitalCatalog() {
+  const hospitals = await prisma.tenant.findMany({
+    where: { type: 'HOSPITAL' },
+    include: { users: true },
+  });
+
+  for (let i = 0; i < hospitals.length; i += 1) {
+    const hospital = hospitals[i];
+    const primary = hospital.users.find((u) => u.isPrimary) || hospital.users[0];
+    await ensureHospitalCatalog(hospital, primary?.userId || null, i);
+  }
+}
+
 async function seedRelations({ patients, medics, pharmacyAdmins }) {
+  if (!patients.length || !medics.length || !pharmacyAdmins.length) return;
+
   for (let i = 0; i < patients.length; i += 1) {
     const patient = patients[i];
     const medic = medics[i % medics.length];
@@ -567,9 +581,9 @@ async function seedRelations({ patients, medics, pharmacyAdmins }) {
 async function main() {
   const userMatrix = {
     patients: generatePeople('PATIENT', TARGET_COUNTS.patients, 'patient', '+254701100'),
-    medics: generatePeople('MEDIC', TARGET_COUNTS.medics, 'medic', '+254702200').map((p) => ({
+    medics: generatePeople('MEDIC', TARGET_COUNTS.medics, 'medic', '+254702200').map((p, i) => ({
       ...p,
-      fullName: `Dr ${p.fullName}`,
+      fullName: `${medicProfiles[i % medicProfiles.length].titlePrefix} ${p.fullName}`,
     })),
     pharmacies: generatePeople('PHARMACY_ADMIN', TARGET_COUNTS.pharmacies, 'pharmacy', '+254703300').map((p) => ({
       ...p,
@@ -651,6 +665,7 @@ async function main() {
   });
 
   await backfillAllPharmacyCatalog();
+  await backfillAllHospitalCatalog();
 
   console.log('\nSeed complete. Use the credentials below:');
   console.log(`Shared password: ${SHARED_PASSWORD}`);
