@@ -1,4 +1,5 @@
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import helmet from 'helmet';
 import compression from 'compression';
@@ -6,9 +7,11 @@ import { winstonLogger } from './common/logger/winston.logger';
 import { ZodValidationPipe } from 'nestjs-zod';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, {
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: winstonLogger,
   });
+  // Required behind Render/other reverse proxies so req.ip is the real client IP.
+  app.set('trust proxy', 1);
 
   const corsOrigins = String(process.env.CORS_ORIGINS || '')
     .split(',')

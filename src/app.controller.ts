@@ -12,6 +12,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { SkipThrottle } from '@nestjs/throttler';
 import { AppService } from './app.service';
 import { InMemoryStore } from './common/in-memory.store';
 
@@ -24,9 +25,19 @@ export class AppController {
     private readonly config: ConfigService,
   ) {}
 
+  @SkipThrottle()
   @Get()
   getHello(): string {
     return this.appService.getHello();
+  }
+
+  @SkipThrottle()
+  @Get('health')
+  health() {
+    return {
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+    };
   }
 
   @Post('client-logs')
