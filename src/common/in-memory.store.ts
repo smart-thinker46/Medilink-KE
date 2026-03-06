@@ -22,6 +22,7 @@ export class InMemoryStore {
     auditLogs: [],
     emails: [],
     passwordResets: [],
+    authOtps: [],
     supportChatRequests: [],
     aiVoiceSessions: [],
     aiVoiceEvents: [],

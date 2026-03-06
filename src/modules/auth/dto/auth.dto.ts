@@ -45,6 +45,9 @@ export const LoginUserSchema = z.object({
   password: z.string(),
   // If logging into a specific tenant context immediately
   tenantId: z.string().uuid().optional(),
+  // OTP step for 2FA login flow
+  challengeId: z.string().uuid().optional(),
+  otp: z.string().trim().min(4).max(8).optional(),
 });
 
 export class LoginUserDto extends createZodDto(LoginUserSchema) {}
