@@ -10,8 +10,13 @@ async function bootstrap() {
     logger: winstonLogger,
   });
 
+  const corsOrigins = String(process.env.CORS_ORIGINS || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
   app.enableCors({
-    origin: '*', // Configure this for production
+    origin: corsOrigins.length ? corsOrigins : true,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     credentials: true,
   });
