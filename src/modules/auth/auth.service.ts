@@ -32,7 +32,13 @@ export class AuthService {
     private authTransientStore: AuthTransientStore,
   ) {}
 
+  private get emailsEnabled() {
+    const raw = String(this.config.get<string>('EMAILS_ENABLED') ?? 'true').trim().toLowerCase();
+    return !['0', 'false', 'no', 'off'].includes(raw);
+  }
+
   private get loginOtpRequired() {
+    if (!this.emailsEnabled) return false;
     const raw = String(this.config.get<string>('AUTH_LOGIN_OTP_REQUIRED') ?? 'true').trim().toLowerCase();
     return !['0', 'false', 'no', 'off'].includes(raw);
   }
@@ -427,6 +433,13 @@ export class AuthService {
   async requestPasswordReset(email: string, clientIp?: string | null) {
     const normalizedEmail = String(email || '').trim().toLowerCase();
     if (!normalizedEmail) throw new BadRequestException('Email is required');
+
+    if (!this.emailsEnabled) {
+      return {
+        success: true,
+        message: 'Password reset email is temporarily disabled.',
+      };
+    }
 
     await this.enforceRateLimit({
       scope: 'password-reset-email',

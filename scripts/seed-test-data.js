@@ -21,14 +21,17 @@ if (fs.existsSync(envPath)) {
 
 const prisma = new PrismaClient();
 
-const SHARED_PASSWORD = process.env.TEST_SEED_PASSWORD || 'Medilink@123';
+const SHARED_PASSWORD = process.env.TEST_SEED_PASSWORD || '1031 Admin...';
+const SUPER_ADMIN_EMAIL = (process.env.SEED_ADMIN_EMAIL || 'admin@medilink.local').toLowerCase();
+const SUPER_ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD || SHARED_PASSWORD;
 const SEED_TAG = 'seed-demo-v1';
 const TARGET_COUNTS = {
   patients: Number(process.env.SEED_PATIENTS || 10),
-  medics: Number(process.env.SEED_MEDICS || 10),
-  pharmacies: Number(process.env.SEED_PHARMACIES || 10),
-  hospitals: Number(process.env.SEED_HOSPITALS || 10),
+  medics: Number(process.env.SEED_MEDICS || 15),
+  pharmacies: Number(process.env.SEED_PHARMACIES || 5),
+  hospitals: Number(process.env.SEED_HOSPITALS || 5),
 };
+const PHARMACY_PRODUCTS_PER_TENANT = Number(process.env.SEED_PRODUCTS_PER_PHARMACY || 5);
 
 const counties = ['Nairobi', 'Kiambu', 'Mombasa', 'Nakuru', 'Kisumu'];
 const medicProfiles = [
@@ -42,6 +45,11 @@ const medicProfiles = [
   { titlePrefix: 'Nutritionist', professionalType: 'Nutritionist', specialization: 'Clinical Nutrition' },
   { titlePrefix: 'Pharmacist', professionalType: 'Pharmacist', specialization: 'Pharmacotherapy' },
   { titlePrefix: 'Imaging', professionalType: 'Radiographer', specialization: 'Diagnostic Imaging' },
+  { titlePrefix: 'Midwife', professionalType: 'Midwife', specialization: 'Maternal Health' },
+  { titlePrefix: 'Surgeon', professionalType: 'Surgeon', specialization: 'General Surgery' },
+  { titlePrefix: 'Pediatrician', professionalType: 'Pediatrician', specialization: 'Pediatrics' },
+  { titlePrefix: 'Anesthetist', professionalType: 'Anesthetist', specialization: 'Anesthesia' },
+  { titlePrefix: 'Psychiatrist', professionalType: 'Psychiatrist', specialization: 'Psychiatry' },
 ];
 
 const PHARMACY_CATALOG = [
@@ -477,11 +485,15 @@ async function ensureTenantCatalog({
 }
 
 async function ensurePharmacyCatalog(tenant, actorUserId, indexSeed = 0) {
+  const productLimit =
+    Number.isFinite(PHARMACY_PRODUCTS_PER_TENANT) && PHARMACY_PRODUCTS_PER_TENANT > 0
+      ? PHARMACY_PRODUCTS_PER_TENANT
+      : 5;
   await ensureTenantCatalog({
     tenant,
     actorUserId,
     indexSeed,
-    catalog: PHARMACY_CATALOG,
+    catalog: PHARMACY_CATALOG.slice(0, productLimit),
     skuPrefix: 'PHA',
     manufacturer: 'MediLink Pharma Supply',
   });
@@ -581,6 +593,43 @@ async function seedRelations({ patients, medics, pharmacyAdmins }) {
   }
 }
 
+async function ensureSuperAdmin() {
+  const hashedPassword = await bcrypt.hash(SUPER_ADMIN_PASSWORD, 10);
+  const existing = await prisma.user.findUnique({ where: { email: SUPER_ADMIN_EMAIL } });
+
+  const user = existing
+    ? await prisma.user.update({
+        where: { email: SUPER_ADMIN_EMAIL },
+        data: {
+          role: 'SUPER_ADMIN',
+          fullName: existing.fullName || 'Super Admin',
+          password: hashedPassword,
+          passwordChangedAt: new Date(),
+          isEmailVerified: true,
+          status: 'active',
+        },
+      })
+    : await prisma.user.create({
+        data: {
+          email: SUPER_ADMIN_EMAIL,
+          password: hashedPassword,
+          role: 'SUPER_ADMIN',
+          fullName: 'Super Admin',
+          isEmailVerified: true,
+          status: 'active',
+          passwordChangedAt: new Date(),
+        },
+      });
+
+  await prisma.systemAdmin.upsert({
+    where: { userId: user.id },
+    update: {},
+    create: { userId: user.id },
+  });
+
+  return user;
+}
+
 async function main() {
   const userMatrix = {
     patients: generatePeople('PATIENT', TARGET_COUNTS.patients, 'patient', '+254701100'),
@@ -669,9 +718,17 @@ async function main() {
 
   await backfillAllPharmacyCatalog();
   await backfillAllHospitalCatalog();
+  const superAdmin = await ensureSuperAdmin();
 
   console.log('\nSeed complete. Use the credentials below:');
   console.log(`Shared password: ${SHARED_PASSWORD}`);
+  console.log(`SUPER_ADMIN: ${superAdmin.email}`);
+  console.log(`SUPER_ADMIN password: ${SUPER_ADMIN_PASSWORD}`);
+  console.log(`Pharmacy products per pharmacy: ${
+    Number.isFinite(PHARMACY_PRODUCTS_PER_TENANT) && PHARMACY_PRODUCTS_PER_TENANT > 0
+      ? PHARMACY_PRODUCTS_PER_TENANT
+      : 5
+  }`);
 
   Object.entries(created).forEach(([role, users]) => {
     console.log(`\n${role.toUpperCase()}:`);
