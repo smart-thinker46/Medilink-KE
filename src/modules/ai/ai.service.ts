@@ -699,8 +699,7 @@ export class AiService {
 
     let blockedReason: string | null = null;
     if (!isPremium) {
-      blockedReason =
-        'AI is locked for this account. Only SUPER_ADMIN has free access. Activate AI subscription to unlock.';
+      blockedReason = 'AI is a premium feature and require to be unlocked for you to use it.';
     } else if (!aiEnabled && !isSuperAdmin) {
       blockedReason = 'AI is disabled. Enable AI in Settings to use this feature.';
     } else if (providerIssue) {
@@ -858,9 +857,7 @@ export class AiService {
     const nextEnabled = Boolean(payload?.enabled);
 
     if (nextEnabled && !isPremium) {
-      throw new ForbiddenException(
-        'AI is locked for this account. Only SUPER_ADMIN has free access. Activate AI subscription to unlock.',
-      );
+      throw new ForbiddenException('AI is a premium feature and require to be unlocked for you to use it.');
     }
 
     await mergeProfileExtras(this.prisma, userId, {
@@ -1408,7 +1405,7 @@ export class AiService {
   private ensureAdminRole(user: any) {
     const role = String(user?.role || '').toUpperCase();
     if (role !== 'SUPER_ADMIN') {
-      throw new ForbiddenException('Only super admins can use this AI admin workspace.');
+      throw new ForbiddenException('This AI admin workspace requires premium access.');
     }
     return role;
   }
@@ -2046,22 +2043,18 @@ export class AiService {
     const role = String(user?.role || '').toUpperCase();
     const normalized = query.toLowerCase();
     const execute = Boolean(payload?.execute);
-    const routeIntent = this.resolveAdminRouteFromQuery(normalized);
 
-    if (routeIntent) {
-      return {
-        intent: 'navigate',
-        answer: `Opening ${routeIntent.label}.`,
-        actions: [{ type: 'OPEN_SCREEN', target: routeIntent.route }],
-        generatedAt: new Date().toISOString(),
-      };
-    }
+    const looksLikeUserSearchIntent =
+      /(search|find|filter|show|list|lookup|locate)/.test(normalized) &&
+      /(user|users|account|accounts|member|members|profile|profiles|patient|patients|medic|medics|doctor|doctors|nurse|nurses|hospital|hospitals|pharmacy|pharmacies|admin|admins|online|offline|suspended|verified|subscription)/.test(
+        normalized,
+      );
 
-    if (/search|find|filter/.test(normalized) && /user|users|account/.test(normalized)) {
+    if (looksLikeUserSearchIntent) {
       if (role !== 'SUPER_ADMIN') {
         return {
           intent: 'search_users',
-          answer: 'User search automation is available for super admin only.',
+          answer: 'User search automation requires premium access.',
           actions: [{ type: 'OPEN_SCREEN', target: '/(app)/(admin)/users' }],
           generatedAt: new Date().toISOString(),
         };
@@ -2078,11 +2071,21 @@ export class AiService {
       };
     }
 
+    const routeIntent = this.resolveAdminRouteFromQuery(normalized);
+    if (routeIntent) {
+      return {
+        intent: 'navigate',
+        answer: `Opening ${routeIntent.label}.`,
+        actions: [{ type: 'OPEN_SCREEN', target: routeIntent.route }],
+        generatedAt: new Date().toISOString(),
+      };
+    }
+
     if (/notify|notification|announce|broadcast|send update/.test(normalized)) {
       if (role !== 'SUPER_ADMIN') {
         return {
           intent: 'send_notification',
-          answer: 'Notification automation is available for super admin only.',
+          answer: 'Notification automation requires premium access.',
           actions: [{ type: 'OPEN_SCREEN', target: '/(app)/(admin)/notifications' }],
           generatedAt: new Date().toISOString(),
         };
@@ -2104,7 +2107,7 @@ export class AiService {
       if (role !== 'SUPER_ADMIN') {
         return {
           intent: 'create_support_ticket',
-          answer: 'Support ticket automation is available for super admin only.',
+          answer: 'Support ticket automation requires premium access.',
           actions: [{ type: 'OPEN_SCREEN', target: '/(app)/(admin)/chat' }],
           generatedAt: new Date().toISOString(),
         };
@@ -2125,7 +2128,7 @@ export class AiService {
       if (role !== 'SUPER_ADMIN') {
         return {
           intent: 'create_emergency_incident',
-          answer: 'Emergency automation is available for super admin only.',
+          answer: 'Emergency automation requires premium access.',
           actions: [{ type: 'OPEN_SCREEN', target: '/(app)/(admin)/control-center' }],
           generatedAt: new Date().toISOString(),
         };
@@ -2146,7 +2149,7 @@ export class AiService {
       if (role !== 'SUPER_ADMIN') {
         return {
           intent: 'manage_user_status',
-          answer: 'User status automation is available for super admin only.',
+          answer: 'User status automation requires premium access.',
           actions: [{ type: 'OPEN_SCREEN', target: '/(app)/(admin)/users' }],
           generatedAt: new Date().toISOString(),
         };
@@ -2214,7 +2217,7 @@ export class AiService {
       if (role !== 'SUPER_ADMIN') {
         return {
           intent: 'export_compliance',
-          answer: 'Compliance export automation is available for super admin only.',
+          answer: 'Compliance export automation requires premium access.',
           actions: [{ type: 'OPEN_SCREEN', target: '/(app)/(admin)/audit-logs' }],
           generatedAt: new Date().toISOString(),
         };
@@ -2235,7 +2238,7 @@ export class AiService {
       if (role !== 'SUPER_ADMIN') {
         return {
           intent: 'update_feature_flag',
-          answer: 'Feature flag automation is available for super admin only.',
+          answer: 'Feature flag automation requires premium access.',
           actions: [{ type: 'OPEN_SCREEN', target: '/(app)/(admin)/settings' }],
           generatedAt: new Date().toISOString(),
         };
@@ -2264,7 +2267,7 @@ export class AiService {
       if (role !== 'SUPER_ADMIN') {
         return {
           intent: 'draft_email',
-          answer: 'Email drafting automation is available for super admin only.',
+          answer: 'Email drafting automation requires premium access.',
           actions: [{ type: 'OPEN_SCREEN', target: '/(app)/(admin)/email-center' }],
           generatedAt: new Date().toISOString(),
         };
@@ -2288,7 +2291,7 @@ export class AiService {
       if (role !== 'SUPER_ADMIN') {
         return {
           intent: 'summarize_email',
-          answer: 'Email summarization automation is available for super admin only.',
+          answer: 'Email summarization automation requires premium access.',
           actions: [{ type: 'OPEN_SCREEN', target: '/(app)/(admin)/email-center' }],
           generatedAt: new Date().toISOString(),
         };

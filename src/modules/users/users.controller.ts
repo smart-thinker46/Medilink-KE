@@ -51,6 +51,58 @@ export class UsersController {
       .filter(Boolean);
   }
 
+  private toFiniteOrNull(value: unknown) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  private normalizeGeoLocation(rawLocation: unknown, fallbackAddress?: string | null) {
+    if (!rawLocation || typeof rawLocation !== 'object') {
+      return null;
+    }
+    const source = rawLocation as Record<string, any>;
+    const latitude = this.toFiniteOrNull(source.latitude ?? source.lat);
+    const longitude = this.toFiniteOrNull(source.longitude ?? source.lng);
+    if (latitude === null || longitude === null) return null;
+    const addressValue = String(
+      source.address ||
+        source.locationAddress ||
+        fallbackAddress ||
+        '',
+    ).trim();
+    return {
+      latitude,
+      longitude,
+      lat: latitude,
+      lng: longitude,
+      address: addressValue,
+      city: String(source.city || '').trim(),
+      area: String(source.area || '').trim(),
+      updatedAt: source.updatedAt || null,
+    };
+  }
+
+  private parseDiscoveryInclude(includeRaw?: string) {
+    const requested = String(includeRaw || '')
+      .split(',')
+      .map((entry) => entry.trim().toLowerCase())
+      .filter(Boolean);
+    if (!requested.length) {
+      return ['MEDIC', 'PHARMACY_ADMIN', 'HOSPITAL_ADMIN'];
+    }
+
+    const includeRoles = new Set<string>();
+    requested.forEach((entry) => {
+      if (entry === 'medic' || entry === 'medics') includeRoles.add('MEDIC');
+      if (entry === 'pharmacy' || entry === 'pharmacies') includeRoles.add('PHARMACY_ADMIN');
+      if (entry === 'hospital' || entry === 'hospitals') includeRoles.add('HOSPITAL_ADMIN');
+    });
+
+    return includeRoles.size
+      ? Array.from(includeRoles)
+      : ['MEDIC', 'PHARMACY_ADMIN', 'HOSPITAL_ADMIN'];
+  }
+
   private evaluateVitalsAlert(vital: Record<string, any>) {
     const alerts: Array<{ severity: 'HIGH' | 'MEDIUM'; title: string; message: string }> = [];
     const systolic = this.toNum(vital?.bloodPressureSystolic, NaN);
@@ -1177,6 +1229,151 @@ export class UsersController {
     };
     await mergeProfileExtras(this.prisma, userId, { location });
     return { success: true, location };
+  }
+
+  @Get('map-discovery')
+  async getMapDiscovery(
+    @Query('include') include?: string,
+    @Query('userId') userId?: string,
+  ) {
+    const roles = this.parseDiscoveryInclude(include);
+    const targetUserId = String(userId || '').trim();
+
+    const users = await this.prisma.user.findMany({
+      where: {
+        role: { in: roles as any },
+        status: 'active',
+        ...(targetUserId ? { id: targetUserId } : {}),
+      },
+      select: {
+        id: true,
+        role: true,
+        fullName: true,
+        email: true,
+        phone: true,
+        status: true,
+        medicProfile: {
+          select: {
+            specialization: true,
+            experienceYears: true,
+            consultationFee: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: targetUserId ? 1 : 500,
+    });
+
+    if (!users.length) return { items: [] };
+
+    const userIds = users.map((user) => user.id);
+    const [extrasMap, tenantLinks] = await Promise.all([
+      getProfileExtrasMap(this.prisma, userIds),
+      this.prisma.tenantUser.findMany({
+        where: {
+          userId: { in: userIds },
+          tenant: { type: { in: ['PHARMACY', 'HOSPITAL'] } },
+        },
+        include: {
+          tenant: {
+            select: {
+              id: true,
+              name: true,
+              type: true,
+              status: true,
+              phone: true,
+              email: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    const tenantByUser = new Map<string, any>();
+    tenantLinks.forEach((link) => {
+      const key = String(link.userId || '');
+      if (!key) return;
+      const current = tenantByUser.get(key);
+      if (!current || (!current.isPrimary && Boolean(link.isPrimary))) {
+        tenantByUser.set(key, link);
+      }
+    });
+
+    const items = users
+      .map((user) => {
+        const role = this.normalizeRole(user.role);
+        const extras = extrasMap.get(user.id) || {};
+        const tenantLink = tenantByUser.get(user.id);
+        const tenant = tenantLink?.tenant || null;
+        const mappedLocation = this.normalizeGeoLocation(
+          extras.location,
+          String(extras.locationAddress || ''),
+        );
+        if (!mappedLocation) return null;
+
+        const kind =
+          role === 'MEDIC'
+            ? 'medic'
+            : role === 'PHARMACY_ADMIN'
+              ? 'pharmacy'
+              : role === 'HOSPITAL_ADMIN'
+                ? 'hospital'
+                : 'user';
+
+        const displayName =
+          role === 'PHARMACY_ADMIN'
+            ? String(extras.pharmacyName || tenant?.name || user.fullName || 'Pharmacy').trim()
+            : role === 'HOSPITAL_ADMIN'
+              ? String(extras.hospitalName || tenant?.name || user.fullName || 'Hospital').trim()
+              : String(user.fullName || extras.fullName || 'User').trim();
+
+        return {
+          id: user.id,
+          userId: user.id,
+          role,
+          kind,
+          name: displayName || 'User',
+          email: user.email || null,
+          phone: user.phone || null,
+          status: user.status || 'active',
+          location: mappedLocation,
+          specialization:
+            role === 'MEDIC'
+              ? String(
+                  user.medicProfile?.specialization ||
+                    extras.specialization ||
+                    extras.professionalType ||
+                    '',
+                ).trim() || null
+              : null,
+          experienceYears:
+            role === 'MEDIC'
+              ? Number(
+                  user.medicProfile?.experienceYears ??
+                    extras.experienceYears ??
+                    0,
+                ) || 0
+              : null,
+          consultationFee:
+            role === 'MEDIC' &&
+            user.medicProfile?.consultationFee !== null &&
+            user.medicProfile?.consultationFee !== undefined
+              ? Number(user.medicProfile.consultationFee)
+              : null,
+          tenantId: tenant?.id || null,
+          tenantName: tenant?.name || null,
+          tenantType: tenant?.type || null,
+          services:
+            Array.isArray(extras.services) && extras.services.length
+              ? extras.services
+              : Array.isArray(extras.specialties)
+                ? extras.specialties
+                : [],
+        };
+      })
+      .filter(Boolean);
+
+    return { items };
   }
 
   @Get(':id/location')
