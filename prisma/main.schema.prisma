@@ -311,6 +311,49 @@ model Shift {
   @@map("shifts")
 }
 
+model Job {
+  id                 String   @id @default(uuid())
+  title              String
+  description        String?
+  department         String
+  specialization     String
+  jobType            String
+  scheduleType       String
+  shiftPattern       String
+  experienceLevel    String
+  responsibilities   String
+  qualifications     String
+  requirements       String
+  benefits           String
+  contactEmail       String
+  contactPhone       String
+  applicationDeadline String
+  startDate          String
+  location           String
+  requiredMedics     Int      @default(0)
+  hours              Int      @default(0)
+  payType            String?
+  payAmount          Decimal? @default(0)
+  status             String   @default("OPEN")
+  createdBy          String
+  employerType       String
+  employerName       String
+  applications       Json?
+  cancellationReason String?
+  cancelledAt        DateTime?
+  cancelledBy        String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([createdBy])
+  @@index([status])
+  @@index([employerName])
+  @@index([specialization])
+  @@index([department])
+  @@index([createdAt])
+  @@map("jobs")
+}
+
 model RolePermission {
   id        String   @id @default(uuid())
   matrix    Json
