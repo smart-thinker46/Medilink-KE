@@ -6,10 +6,11 @@ import { AiVoiceWebhookController } from './ai-voice-webhook.controller';
 import { AiVapiService } from './ai-vapi.service';
 import { AiVoiceToolsService } from './ai-voice-tools.service';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { AiLocalVoiceService } from './ai-local-voice.service';
 
 @Module({
   imports: [NotificationsModule],
   controllers: [AiController, AiVoiceController, AiVoiceWebhookController],
-  providers: [AiService, AiVapiService, AiVoiceToolsService],
+  providers: [AiService, AiVapiService, AiVoiceToolsService, AiLocalVoiceService],
 })
 export class AiModule {}

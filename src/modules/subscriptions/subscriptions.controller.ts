@@ -3,6 +3,7 @@ import { AuthGuard } from '@nestjs/passport';
 import { InMemoryStore } from 'src/common/in-memory.store';
 import { PrismaService } from 'src/database/prisma.service';
 import { mergeProfileExtras } from 'src/common/profile-extras';
+import { getSubscriptionPricingPersistent } from 'src/common/subscription-pricing';
 
 @Controller('subscriptions')
 @UseGuards(AuthGuard('jwt'))
@@ -78,6 +79,6 @@ export class SubscriptionsController {
 
   @Get('pricing')
   async pricing() {
-    return InMemoryStore.getSubscriptionPricing();
+    return getSubscriptionPricingPersistent(this.prisma);
   }
 }

@@ -10,6 +10,7 @@ import { UsersModule } from './modules/users/users.module';
 import { AppointmentsModule } from './modules/appointments/appointments.module';
 import { MedicsModule } from './modules/medics/medics.module';
 import { ShiftsModule } from './modules/shifts/shifts.module';
+import { JobsModule } from './modules/jobs/jobs.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { PharmacyModule } from './modules/pharmacy/pharmacy.module';
 import { PaymentsModule } from './modules/payments/payments.module';
@@ -120,6 +121,7 @@ import { SubscriptionAccessInterceptor } from './common/subscription-access.inte
     AppointmentsModule,
     MedicsModule,
     ShiftsModule,
+    JobsModule,
     OrdersModule,
     PharmacyModule,
     PaymentsModule,

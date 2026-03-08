@@ -8,6 +8,11 @@ import { resolve } from 'path';
 export class EmailsService {
   constructor(private config: ConfigService) {}
 
+  get isEnabled() {
+    const raw = String(this.config.get<string>('EMAILS_ENABLED') ?? 'true').trim().toLowerCase();
+    return !['0', 'false', 'no', 'off'].includes(raw);
+  }
+
   private get brand() {
     return {
       background: '#ffffff',
@@ -94,6 +99,9 @@ export class EmailsService {
     metadata?: Record<string, any>;
     attachments?: { filename: string; content: string; contentType?: string }[];
   }) {
+    if (!this.isEnabled) {
+      return { skipped: true, reason: 'emails_disabled' };
+    }
     if (!this.apiKey) {
       throw new Error('RESEND_API_KEY is not configured');
     }

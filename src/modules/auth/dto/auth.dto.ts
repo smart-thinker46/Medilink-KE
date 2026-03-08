@@ -51,3 +51,13 @@ export const LoginUserSchema = z.object({
 });
 
 export class LoginUserDto extends createZodDto(LoginUserSchema) {}
+
+export const GoogleAuthSchema = z.object({
+  idToken: z.string().min(10),
+  // Optional tenant context for existing users with multiple memberships.
+  tenantId: z.string().uuid().optional(),
+  // For new accounts created through Google; currently PATIENT only.
+  role: z.enum(['PATIENT']).optional(),
+});
+
+export class GoogleAuthDto extends createZodDto(GoogleAuthSchema) {}

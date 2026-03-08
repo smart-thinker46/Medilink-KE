@@ -1,7 +1,7 @@
 import { Injectable, UnauthorizedException, BadRequestException, ConflictException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from 'src/database/prisma.service';
-import { LoginUserDto, RegisterUserDto } from './dto/auth.dto';
+import { GoogleAuthDto, LoginUserDto, RegisterUserDto } from './dto/auth.dto';
 import * as bcrypt from 'bcrypt';
 import { ConfigService } from '@nestjs/config';
 import { Tenant, TenantType, User } from '@prisma/client';
@@ -9,6 +9,7 @@ import { getProfileExtras } from 'src/common/profile-extras';
 import { EmailsService } from '../emails/emails.service';
 import { randomInt, randomUUID } from 'crypto';
 import { AuthTransientStore } from './auth-transient.store';
+import { OAuth2Client } from 'google-auth-library';
 import {
   computePasswordExpiryDate,
   isPasswordExpired,
@@ -24,6 +25,8 @@ type LoginContext = {
 
 @Injectable()
 export class AuthService {
+  private readonly googleClient = new OAuth2Client();
+
   constructor(
     private prisma: PrismaService,
     private jwt: JwtService,
@@ -32,7 +35,13 @@ export class AuthService {
     private authTransientStore: AuthTransientStore,
   ) {}
 
+  private get emailsEnabled() {
+    const raw = String(this.config.get<string>('EMAILS_ENABLED') ?? 'true').trim().toLowerCase();
+    return !['0', 'false', 'no', 'off'].includes(raw);
+  }
+
   private get loginOtpRequired() {
+    if (!this.emailsEnabled) return false;
     const raw = String(this.config.get<string>('AUTH_LOGIN_OTP_REQUIRED') ?? 'true').trim().toLowerCase();
     return !['0', 'false', 'no', 'off'].includes(raw);
   }
@@ -65,6 +74,61 @@ export class AuthService {
   private get passwordResetRateMaxPerWindow() {
     const raw = Number(this.config.get<string>('AUTH_PASSWORD_RESET_MAX_PER_WINDOW') || 5);
     return Number.isFinite(raw) && raw > 0 ? raw : 5;
+  }
+
+  private get googleClientIds() {
+    const configured = [
+      this.config.get<string>('GOOGLE_CLIENT_ID'),
+      this.config.get<string>('GOOGLE_WEB_CLIENT_ID'),
+      this.config.get<string>('GOOGLE_ANDROID_CLIENT_ID'),
+      this.config.get<string>('GOOGLE_IOS_CLIENT_ID'),
+      this.config.get<string>('GOOGLE_CLIENT_IDS'),
+    ]
+      .filter(Boolean)
+      .join(',');
+
+    return Array.from(
+      new Set(
+        String(configured || '')
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
+      ),
+    );
+  }
+
+  private async verifyGoogleIdToken(idToken: string) {
+    const token = String(idToken || '').trim();
+    if (!token) {
+      throw new BadRequestException('Google idToken is required');
+    }
+
+    const audiences = this.googleClientIds;
+    if (!audiences.length) {
+      throw new BadRequestException(
+        'Google Sign-In is not configured. Missing GOOGLE_CLIENT_ID(S).',
+      );
+    }
+
+    let lastError: any = null;
+    for (const audience of audiences) {
+      try {
+        const ticket = await this.googleClient.verifyIdToken({
+          idToken: token,
+          audience,
+        });
+        const payload = ticket.getPayload();
+        if (payload?.email) {
+          return payload;
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw new UnauthorizedException(
+      `Invalid Google ID token${lastError?.message ? `: ${String(lastError.message)}` : ''}`,
+    );
   }
 
   private generateOtpCode(length = 6) {
@@ -413,6 +477,97 @@ export class AuthService {
     return this.verifyLoginOtp(context, String(dto.challengeId || '').trim(), String(dto.otp || '').trim());
   }
 
+  async googleContinue(dto: GoogleAuthDto) {
+    const googlePayload = await this.verifyGoogleIdToken(dto.idToken);
+    const email = String(googlePayload?.email || '')
+      .trim()
+      .toLowerCase();
+
+    if (!email) {
+      throw new UnauthorizedException('Google account does not include a valid email.');
+    }
+    if (googlePayload?.email_verified === false) {
+      throw new UnauthorizedException('Google email is not verified.');
+    }
+
+    let userRecord: any = await this.prisma.user.findUnique({
+      where: { email },
+      include: { tenants: { include: { tenant: true } } },
+    });
+
+    if (!userRecord) {
+      const requestedRole = String(dto?.role || 'PATIENT').toUpperCase();
+      if (requestedRole !== 'PATIENT') {
+        throw new BadRequestException(
+          'Google sign up currently supports PATIENT role only.',
+        );
+      }
+
+      const fullName =
+        String(googlePayload?.name || '').trim() ||
+        [googlePayload?.given_name, googlePayload?.family_name]
+          .map((item) => String(item || '').trim())
+          .filter(Boolean)
+          .join(' ') ||
+        email.split('@')[0];
+
+      userRecord = await this.prisma.user.create({
+        data: {
+          email,
+          password: await bcrypt.hash(randomUUID(), 10),
+          role: 'PATIENT',
+          fullName,
+          isEmailVerified: true,
+          status: 'active',
+          passwordChangedAt: new Date(),
+        },
+        include: { tenants: { include: { tenant: true } } },
+      });
+
+      if (this.emailsEnabled) {
+        const locale = 'en' as const;
+        void this.emails
+          .sendTransactional({
+            to: email,
+            subject: this.emails.t(locale, 'welcome_title'),
+            html: this.emails.buildBrandedHtml({
+              title: this.emails.t(locale, 'welcome_title'),
+              body: `<p>${this.emails.t(locale, 'welcome_body')}</p>`,
+              locale,
+            }),
+            text: this.emails.t(locale, 'welcome_body'),
+            tags: { type: 'welcome-google' },
+          })
+          .catch(() => undefined);
+      }
+    }
+
+    const extras = await getProfileExtras(this.prisma, userRecord.id);
+    if (extras?.blocked || userRecord.status !== 'active') {
+      throw new UnauthorizedException('Account suspended');
+    }
+
+    let tenantId: string | null | undefined = dto?.tenantId;
+    let tenantType: TenantType | null = null;
+    if (tenantId) {
+      const link = userRecord.tenants.find((t: any) => t.tenantId === tenantId);
+      if (!link) throw new UnauthorizedException('Access denied to this tenant');
+      tenantType = link.tenant.type;
+    } else if (userRecord.tenants.length > 0) {
+      const primary = userRecord.tenants.find((t: any) => t.isPrimary) || userRecord.tenants[0];
+      tenantId = primary.tenantId;
+      tenantType = primary.tenant.type;
+    }
+
+    const context: LoginContext = {
+      user: userRecord as User,
+      extras: extras || {},
+      tenantId,
+      tenantType,
+    };
+    return this.buildLoginSuccess(context);
+  }
+
   private async signToken(userId: string, email: string, role: string, tenantId?: string, tenantType?: string) {
     const payload = {
       sub: userId,
@@ -427,6 +582,13 @@ export class AuthService {
   async requestPasswordReset(email: string, clientIp?: string | null) {
     const normalizedEmail = String(email || '').trim().toLowerCase();
     if (!normalizedEmail) throw new BadRequestException('Email is required');
+
+    if (!this.emailsEnabled) {
+      return {
+        success: true,
+        message: 'Password reset email is temporarily disabled.',
+      };
+    }
 
     await this.enforceRateLimit({
       scope: 'password-reset-email',

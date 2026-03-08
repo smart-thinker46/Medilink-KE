@@ -11,11 +11,15 @@ import {
   Query,
   ForbiddenException,
   NotFoundException,
+  BadRequestException,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { InMemoryStore } from 'src/common/in-memory.store';
 import { PrismaService } from 'src/database/prisma.service';
-import { ensureHospitalProfileComplete, ensureMedicProfileComplete } from 'src/common/profile-validation';
+import {
+  ensureHospitalProfileComplete,
+  ensureMedicProfileComplete,
+} from 'src/common/profile-validation';
 import { getProfileExtras } from 'src/common/profile-extras';
 import { NotificationsGateway } from '../notifications/notifications.gateway';
 import { PushService } from 'src/common/push.service';
@@ -38,6 +42,125 @@ export class ShiftsController {
   private normalizeNumber(value: any, fallback = 0) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  private normalizeOpportunityType(value: any, fallback: 'SHIFT' | 'JOB' = 'SHIFT') {
+    const normalized = String(value || '').trim().toUpperCase();
+    if (normalized === 'JOB' || normalized === 'SHIFT') return normalized as 'SHIFT' | 'JOB';
+    return fallback;
+  }
+
+  private parseJobDetails(value: any): Record<string, any> | null {
+    if (!value) return null;
+    if (typeof value === 'object') return value as Record<string, any>;
+    if (typeof value !== 'string') return null;
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private sanitizeText(value: any) {
+    const text = String(value ?? '').trim();
+    return text.length ? text : null;
+  }
+
+  private buildJobDetails(body: any, base: Record<string, any> = {}) {
+    return {
+      opportunityType:
+        this.sanitizeText(body?.opportunityType) ??
+        base.opportunityType ??
+        'SHIFT',
+      requirements:
+        this.sanitizeText(body?.requirements ?? body?.specifications) ??
+        base.requirements ??
+        null,
+      department: this.sanitizeText(body?.department) ?? base.department ?? null,
+      jobType: this.sanitizeText(body?.jobType) ?? base.jobType ?? null,
+      scheduleType: this.sanitizeText(body?.scheduleType) ?? base.scheduleType ?? null,
+      shiftPattern: this.sanitizeText(body?.shiftPattern) ?? base.shiftPattern ?? null,
+      experienceLevel: this.sanitizeText(body?.experienceLevel) ?? base.experienceLevel ?? null,
+      startDate: this.sanitizeText(body?.startDate) ?? base.startDate ?? null,
+      applicationDeadline:
+        this.sanitizeText(body?.applicationDeadline) ?? base.applicationDeadline ?? null,
+      responsibilities:
+        this.sanitizeText(body?.responsibilities) ?? base.responsibilities ?? null,
+      qualifications: this.sanitizeText(body?.qualifications) ?? base.qualifications ?? null,
+      benefits: this.sanitizeText(body?.benefits) ?? base.benefits ?? null,
+      contactEmail: this.sanitizeText(body?.contactEmail) ?? base.contactEmail ?? null,
+      contactPhone: this.sanitizeText(body?.contactPhone) ?? base.contactPhone ?? null,
+    };
+  }
+
+  private serializeJobDetails(details: Record<string, any>) {
+    const compact = Object.fromEntries(
+      Object.entries(details || {}).filter(([, value]) => value !== null && value !== undefined && `${value}`.trim() !== ''),
+    );
+    return JSON.stringify(compact);
+  }
+
+  private collectMissingJobFields(input: {
+    title?: any;
+    description?: any;
+    specialization?: any;
+    location?: any;
+    requiredMedics?: any;
+    hours?: any;
+    details?: Record<string, any>;
+  }) {
+    const details = input.details || {};
+    const requiredTextFields: Array<{ key: string; label: string; value: any }> = [
+      { key: 'title', label: 'Job title', value: input.title },
+      { key: 'description', label: 'Job summary', value: input.description },
+      { key: 'department', label: 'Department', value: details.department },
+      { key: 'specialization', label: 'Specialization', value: input.specialization },
+      { key: 'jobType', label: 'Job type', value: details.jobType },
+      { key: 'scheduleType', label: 'Schedule type', value: details.scheduleType },
+      { key: 'shiftPattern', label: 'Shift pattern', value: details.shiftPattern },
+      { key: 'experienceLevel', label: 'Experience level', value: details.experienceLevel },
+      { key: 'responsibilities', label: 'Responsibilities', value: details.responsibilities },
+      { key: 'qualifications', label: 'Qualifications', value: details.qualifications },
+      { key: 'requirements', label: 'Requirements', value: details.requirements },
+      { key: 'benefits', label: 'Benefits', value: details.benefits },
+      { key: 'contactEmail', label: 'Contact email', value: details.contactEmail },
+      { key: 'contactPhone', label: 'Contact phone', value: details.contactPhone },
+      { key: 'applicationDeadline', label: 'Application deadline', value: details.applicationDeadline },
+      { key: 'startDate', label: 'Start date', value: details.startDate },
+      { key: 'location', label: 'Location', value: input.location },
+    ];
+    const missingText = requiredTextFields
+      .filter((field) => !this.sanitizeText(field.value))
+      .map((field) => field.label);
+
+    const requiredCountFields: Array<{ label: string; value: any }> = [
+      { label: 'Required medics', value: input.requiredMedics },
+      { label: 'Working hours', value: input.hours },
+    ];
+    const missingCounts = requiredCountFields
+      .filter((field) => this.normalizeNumber(field.value, 0) <= 0)
+      .map((field) => field.label);
+
+    return [...missingText, ...missingCounts];
+  }
+
+  private ensureJobFieldsComplete(input: {
+    title?: any;
+    description?: any;
+    specialization?: any;
+    location?: any;
+    requiredMedics?: any;
+    hours?: any;
+    details?: Record<string, any>;
+  }) {
+    const missingFields = this.collectMissingJobFields(input);
+    if (missingFields.length) {
+      throw new BadRequestException({
+        message: 'Job details incomplete',
+        missingFields,
+      });
+    }
   }
 
   @Get('analytics/hospital')
@@ -203,6 +326,7 @@ export class ShiftsController {
     @Query('hospital') hospital?: string,
     @Query('status') status?: string,
     @Query('mine') mine?: string,
+    @Query('opportunityType') opportunityType?: string,
   ) {
     const mineOnly = String(mine || '').toLowerCase() === 'true' || mine === '1';
     const currentUserId = req.user?.userId;
@@ -242,6 +366,11 @@ export class ShiftsController {
       where.hospitalName = { contains: hospital, mode: 'insensitive' };
     }
 
+    const rawType = String(opportunityType || '').trim().toUpperCase();
+    if (rawType === 'JOB') {
+      return [];
+    }
+
     return this.db.shift.findMany({
       where,
       orderBy: { updatedAt: 'desc' },
@@ -251,13 +380,37 @@ export class ShiftsController {
   @Post()
   async create(@Req() req: any, @Body() body: any) {
     const userId = req.user?.userId;
+    const role = String(req.user?.role || '').toUpperCase();
+    if (!userId || role !== 'HOSPITAL_ADMIN') {
+      throw new ForbiddenException('Only hospital admins can create shifts.');
+    }
+
+    const requestedType = String(body?.opportunityType || '').trim().toUpperCase();
+    if (requestedType === 'JOB') {
+      throw new BadRequestException('Jobs must be created using /jobs.');
+    }
     await ensureHospitalProfileComplete(this.prisma, userId);
 
     const extras = await getProfileExtras(this.prisma, userId);
+    const employerName =
+      extras.hospitalName ||
+      body.hospitalName ||
+      null;
+    const employerLocation =
+      extras.locationAddress ||
+      extras.location?.address ||
+      extras.location ||
+      extras.address ||
+      body.location ||
+      body.area ||
+      null;
+    const shiftRequirements =
+      this.sanitizeText(body?.requirements ?? body?.specifications) ?? null;
+
     const payload: any = {
       title: body.title || body.task,
-      description: body.description,
-      specifications: body.specifications,
+      description: body.description || body.summary || null,
+      specifications: shiftRequirements,
       specialization: body.specialization || body.category || null,
       requiredMedics: Number(body.requiredMedics || body.medicsRequired || 0),
       hours: Number(body.hours || 0),
@@ -265,10 +418,23 @@ export class ShiftsController {
       payAmount: Number(body.payAmount || 0),
       status: 'OPEN',
       createdBy: userId,
-      hospitalName: extras.hospitalName || body.hospitalName,
-      location: extras.locationAddress || extras.location || body.location,
+      hospitalName: employerName,
+      location: employerLocation,
       applications: [],
     };
+
+    if (!this.sanitizeText(payload.title)) {
+      throw new BadRequestException({
+        message: 'Shift details incomplete',
+        missingFields: ['Shift title'],
+      });
+    }
+    if (this.normalizeNumber(payload.requiredMedics, 0) <= 0 || this.normalizeNumber(payload.hours, 0) <= 0) {
+      throw new BadRequestException({
+        message: 'Shift details incomplete',
+        missingFields: ['Required medics', 'Working hours'],
+      });
+    }
     return this.db.shift.create({ data: payload });
   }
 
@@ -386,19 +552,49 @@ export class ShiftsController {
       throw new ForbiddenException('You are not allowed to edit this shift.');
     }
 
+    const requestedType = String(body?.opportunityType || '').trim().toUpperCase();
+    if (requestedType === 'JOB') {
+      throw new BadRequestException('Jobs must be edited using /jobs/:id.');
+    }
+    const shiftRequirements =
+      this.sanitizeText(body?.requirements ?? body?.specifications) ??
+      this.sanitizeText(shift?.specifications) ??
+      null;
+
+    const nextTitle = body.title ?? body.task ?? shift.title;
+    const nextDescription = body.description ?? body.summary ?? shift.description;
+    const nextSpecialization =
+      body.specialization ?? body.category ?? body.department ?? shift.specialization;
+    const nextRequiredMedics = body.requiredMedics ?? body.medicsRequired ?? shift.requiredMedics;
+    const nextHours = body.hours ?? shift.hours;
+    const nextLocation = body.location ?? shift.location;
+
+    if (!this.sanitizeText(nextTitle)) {
+      throw new BadRequestException({
+        message: 'Shift details incomplete',
+        missingFields: ['Shift title'],
+      });
+    }
+    if (this.normalizeNumber(nextRequiredMedics, 0) <= 0 || this.normalizeNumber(nextHours, 0) <= 0) {
+      throw new BadRequestException({
+        message: 'Shift details incomplete',
+        missingFields: ['Required medics', 'Working hours'],
+      });
+    }
+
     const updated = await this.db.shift.update({
       where: { id },
       data: {
-      title: body.title ?? body.task ?? shift.title,
-      description: body.description ?? shift.description,
-      specifications: body.specifications ?? body.requirements ?? shift.specifications,
-      specialization: body.specialization ?? body.category ?? shift.specialization,
-      requiredMedics: body.requiredMedics ?? body.medicsRequired ?? shift.requiredMedics,
-      hours: body.hours ?? shift.hours,
-      payType: body.payType ?? shift.payType,
-      payAmount: body.payAmount ?? shift.payAmount,
-      location: body.location ?? shift.location,
-      status: body.status ?? shift.status,
+        title: nextTitle,
+        description: nextDescription,
+        specifications: shiftRequirements,
+        specialization: nextSpecialization,
+        requiredMedics: nextRequiredMedics,
+        hours: nextHours,
+        payType: body.payType ?? shift.payType,
+        payAmount: body.payAmount ?? shift.payAmount,
+        location: nextLocation,
+        status: body.status ?? shift.status,
       },
     });
     return updated;
@@ -418,7 +614,7 @@ export class ShiftsController {
       where: { id },
       data: {
       status: 'CANCELLED',
-      cancellationReason: body?.reason || 'Cancelled by hospital admin',
+      cancellationReason: body?.reason || 'Cancelled by employer admin',
       cancelledAt: new Date(),
       cancelledBy: userId,
       },
