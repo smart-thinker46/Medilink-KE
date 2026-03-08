@@ -340,4 +340,16 @@ export class AiVoiceToolsService {
       status: request.status,
     };
   }
+
+  async guideAppUsage(args: any, context: VoiceContext) {
+    const topic = String(args?.topic || args?.workflow || '').trim();
+    const query = String(args?.query || args?.note || '').trim();
+    return this.aiService.appHelp(
+      {
+        topic,
+        query,
+      },
+      { userId: context.userId, role: context.role },
+    );
+  }
 }

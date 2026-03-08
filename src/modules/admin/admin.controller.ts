@@ -280,31 +280,44 @@ export class AdminController {
     return this.hasValue(fullName) && this.hasValue(user?.phone);
   }
 
-  @Get('users')
-  async users(
-    @Query('role') role?: string,
-    @Query('active') active?: string,
-    @Query('verified') verified?: string,
-    @Query('search') search?: string,
-    @Query('page') page?: string,
-    @Query('pageSize') pageSize?: string,
-    @Query('status') status?: string,
-    @Query('startDate') startDate?: string,
-    @Query('endDate') endDate?: string,
-    @Query('sort') sort?: string,
-  ) {
-    const roleFilter = role && Object.values(UserRole).includes(role as UserRole) ? (role as UserRole) : undefined;
-    const statusFilter = status && ['active', 'suspended'].includes(status) ? status : undefined;
+  private parseBooleanQuery(value?: string) {
+    if (value === undefined || value === null || value === '') return undefined;
+    const normalized = String(value).trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1') return true;
+    if (normalized === 'false' || normalized === '0') return false;
+    return undefined;
+  }
+
+  private async listAdminUsers(filters: {
+    role?: string;
+    active?: string;
+    verified?: string;
+    search?: string;
+    status?: string;
+    startDate?: string;
+    endDate?: string;
+    sort?: string;
+    online?: string;
+  }) {
+    const roleFilter =
+      filters?.role && Object.values(UserRole).includes(filters.role as UserRole)
+        ? (filters.role as UserRole)
+        : undefined;
+    const statusFilter =
+      filters?.status && ['active', 'suspended'].includes(filters.status) ? filters.status : undefined;
+    const activeFilter = this.parseBooleanQuery(filters?.active);
+    const verifiedFilter = this.parseBooleanQuery(filters?.verified);
+    const onlineFilter = this.parseBooleanQuery(filters?.online);
 
     const createdAtFilter: any = {};
-    if (startDate) {
-      const start = new Date(startDate);
+    if (filters?.startDate) {
+      const start = new Date(filters.startDate);
       if (!Number.isNaN(start.getTime())) {
         createdAtFilter.gte = start;
       }
     }
-    if (endDate) {
-      const end = new Date(endDate);
+    if (filters?.endDate) {
+      const end = new Date(filters.endDate);
       if (!Number.isNaN(end.getTime())) {
         end.setHours(23, 59, 59, 999);
         createdAtFilter.lte = end;
@@ -327,7 +340,7 @@ export class AdminController {
         ...(Object.keys(createdAtFilter).length ? { createdAt: createdAtFilter } : {}),
       },
       orderBy: {
-        createdAt: sort === 'oldest' ? 'asc' : 'desc',
+        createdAt: filters?.sort === 'oldest' ? 'asc' : 'desc',
       },
     });
 
@@ -353,23 +366,24 @@ export class AdminController {
         idFront: extras.idFront || extras.idFrontUrl || '',
         idBack: extras.idBack || extras.idBackUrl || '',
         subscriptionActive: Boolean(extras.subscriptionActive),
+        isOnline: this.notificationsGateway.isUserOnline(user.id),
       };
     });
 
-    if (active === 'true') {
-      list = list.filter((item) => item.subscriptionActive);
-    } else if (active === 'false') {
-      list = list.filter((item) => !item.subscriptionActive);
+    if (activeFilter !== undefined) {
+      list = list.filter((item) => item.subscriptionActive === activeFilter);
     }
 
-    if (verified === 'true') {
-      list = list.filter((item) => item.verified);
-    } else if (verified === 'false') {
-      list = list.filter((item) => !item.verified);
+    if (verifiedFilter !== undefined) {
+      list = list.filter((item) => item.verified === verifiedFilter);
     }
 
-    if (search) {
-      const needle = search.toLowerCase();
+    if (onlineFilter !== undefined) {
+      list = list.filter((item) => item.isOnline === onlineFilter);
+    }
+
+    if (filters?.search) {
+      const needle = filters.search.toLowerCase();
       list = list.filter(
         (item) =>
           item.firstName.toLowerCase().includes(needle) ||
@@ -377,6 +391,35 @@ export class AdminController {
           item.email?.toLowerCase().includes(needle),
       );
     }
+
+    return list;
+  }
+
+  @Get('users')
+  async users(
+    @Query('role') role?: string,
+    @Query('active') active?: string,
+    @Query('verified') verified?: string,
+    @Query('search') search?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+    @Query('status') status?: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+    @Query('sort') sort?: string,
+    @Query('online') online?: string,
+  ) {
+    const list = await this.listAdminUsers({
+      role,
+      active,
+      verified,
+      search,
+      status,
+      startDate,
+      endDate,
+      sort,
+      online,
+    });
 
     const pageNumber = Math.max(1, Number(page) || 1);
     const size = Math.min(200, Math.max(5, Number(pageSize) || 20));
@@ -543,10 +586,7 @@ export class AdminController {
     return { success: true, user };
   }
 
-  @Delete('users/:id')
-  async deleteUser(@Req() req: any, @Param('id') id: string) {
-    const targetId = String(id || '').trim();
-    const requesterId = String(req?.user?.userId || '').trim();
+  private async deleteUserCascade(targetId: string, requesterId: string) {
     if (!targetId) {
       throw new BadRequestException('User id is required.');
     }
@@ -610,8 +650,87 @@ export class AdminController {
       by: requesterId,
       createdAt: new Date().toISOString(),
     });
+  }
 
+  @Delete('users/:id')
+  async deleteUser(@Req() req: any, @Param('id') id: string) {
+    const targetId = String(id || '').trim();
+    const requesterId = String(req?.user?.userId || '').trim();
+    await this.deleteUserCascade(targetId, requesterId);
     return { success: true, deletedUserId: targetId };
+  }
+
+  @Post('users/delete/bulk')
+  async deleteUsersBulk(@Req() req: any, @Body() body: any) {
+    const requesterId = String(req?.user?.userId || '').trim();
+    if (!requesterId) {
+      throw new UnauthorizedException('Unauthenticated admin request.');
+    }
+
+    const explicitIds: string[] = Array.isArray(body?.userIds)
+      ? body.userIds
+          .map((id: any) => String(id || '').trim())
+          .filter((id: string) => id.length > 0)
+      : [];
+    const deleteAll = Boolean(body?.deleteAll);
+
+    let targetIds: string[] = Array.from(new Set(explicitIds));
+    if (deleteAll) {
+      const filters = body?.filters || {};
+      const users = await this.listAdminUsers({
+        role: filters?.role,
+        active: filters?.active,
+        verified: filters?.verified,
+        search: filters?.search,
+        status: filters?.status,
+        startDate: filters?.startDate,
+        endDate: filters?.endDate,
+        sort: filters?.sort,
+        online: filters?.online,
+      });
+      targetIds = users
+        .map((user: any) => String(user?.id || '').trim())
+        .filter((id: string) => id.length > 0);
+    }
+
+    targetIds = targetIds.filter((id: string) => id !== requesterId);
+    if (!targetIds.length) {
+      throw new BadRequestException('No eligible users selected for deletion.');
+    }
+
+    const deletedUserIds: string[] = [];
+    const failed: Array<{ userId: string; reason: string }> = [];
+
+    for (const userId of targetIds) {
+      try {
+        await this.deleteUserCascade(userId, requesterId);
+        deletedUserIds.push(userId);
+      } catch (error: any) {
+        failed.push({
+          userId,
+          reason: String(error?.message || 'Delete failed'),
+        });
+      }
+    }
+
+    InMemoryStore.logAudit({
+      action: deleteAll ? 'ADMIN_USERS_BULK_DELETED_FILTERED' : 'ADMIN_USERS_BULK_DELETED_SELECTED',
+      targetId: requesterId,
+      createdAt: new Date().toISOString(),
+      details: {
+        requested: targetIds.length,
+        deleted: deletedUserIds.length,
+        failed: failed.length,
+      },
+    });
+
+    return {
+      success: failed.length === 0,
+      requestedCount: targetIds.length,
+      deletedCount: deletedUserIds.length,
+      deletedUserIds,
+      failed,
+    };
   }
 
   @Put('users/:id/verify')

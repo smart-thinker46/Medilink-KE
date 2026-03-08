@@ -43,16 +43,16 @@ export class AiVapiService {
 
   private modeTools(mode: VoiceMode) {
     if (mode === 'search') {
-      return ['search_medics', 'search_hospitals', 'search_pharmacy_products'];
+      return ['search_medics', 'search_hospitals', 'search_pharmacy_products', 'guide_app_usage'];
     }
     if (mode === 'support') {
-      return ['request_support_chat'];
+      return ['request_support_chat', 'guide_app_usage'];
     }
     if (mode === 'emergency') {
-      return ['get_emergency_contacts', 'search_medics', 'search_hospitals'];
+      return ['get_emergency_contacts', 'search_medics', 'search_hospitals', 'guide_app_usage'];
     }
     if (mode === 'records') {
-      return ['summarize_health_record', 'search_pharmacy_products'];
+      return ['summarize_health_record', 'search_pharmacy_products', 'guide_app_usage'];
     }
     return [
       'search_medics',
@@ -61,6 +61,7 @@ export class AiVapiService {
       'summarize_health_record',
       'get_emergency_contacts',
       'request_support_chat',
+      'guide_app_usage',
     ];
   }
 
@@ -74,7 +75,7 @@ export class AiVapiService {
 
   private buildSystemPrompt(mode: VoiceMode, role: string) {
     const base = [
-      'You are MediLink Voice AI assistant.',
+      'You are Medilink AI Voice Assistant.',
       'Keep responses concise and actionable.',
       'Never claim to be a doctor and never provide diagnosis.',
       'Use tool calls for data retrieval; do not fabricate records.',
@@ -264,6 +265,9 @@ export class AiVapiService {
     }
     if (name === 'request_support_chat') {
       return this.tools.requestSupportChat(args, context);
+    }
+    if (name === 'guide_app_usage') {
+      return this.tools.guideAppUsage(args, context);
     }
     throw new BadRequestException(`Unsupported tool: ${name}`);
   }

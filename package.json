@@ -50,6 +50,7 @@
     "compression": "^1.8.1",
     "csurf": "^1.11.0",
     "firebase-admin": "^12.7.0",
+    "google-auth-library": "^9.15.1",
     "helmet": "^8.1.0",
     "ioredis": "^5.9.2",
     "multer": "^2.0.2",

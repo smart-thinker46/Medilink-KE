@@ -1,6 +1,6 @@
 import { Body, Controller, Post, HttpCode, HttpStatus, Req } from '@nestjs/common';
 import { AuthService } from './auth.service';
-import { LoginUserDto, RegisterUserDto } from './dto/auth.dto';
+import { GoogleAuthDto, LoginUserDto, RegisterUserDto } from './dto/auth.dto';
 import type { Request } from 'express';
 
 @Controller('auth')
@@ -33,6 +33,12 @@ export class AuthController {
   @Post('login')
   async login(@Body() dto: LoginUserDto, @Req() req: Request) {
     return this.authService.login(dto, this.getClientIp(req));
+  }
+
+  @HttpCode(HttpStatus.OK)
+  @Post('google')
+  async googleContinue(@Body() dto: GoogleAuthDto) {
+    return this.authService.googleContinue(dto);
   }
 
   @Post('password/forgot')
