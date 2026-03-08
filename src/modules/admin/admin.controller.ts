@@ -19,9 +19,17 @@ import { PrismaService } from 'src/database/prisma.service';
 import { UserRole } from '@prisma/client';
 import { InMemoryStore } from 'src/common/in-memory.store';
 import { getProfileExtrasMap, mergeProfileExtras } from 'src/common/profile-extras';
+import {
+  getSubscriptionPricingPersistent,
+  updateSubscriptionPricingPersistent,
+} from 'src/common/subscription-pricing';
 import { NotificationsGateway } from 'src/modules/notifications/notifications.gateway';
 import { EmailsService } from 'src/modules/emails/emails.service';
 import * as bcrypt from 'bcrypt';
+import {
+  getConfiguredAiVoiceModels,
+  resolveAiVoiceModel,
+} from 'src/common/ai-voice-models';
 
 @Controller('admin')
 @UseGuards(AuthGuard('jwt'), SuperAdminGuard)
@@ -110,7 +118,7 @@ export class AdminController {
       { completed: 0, incomplete: 0 },
     );
 
-    const pricing = InMemoryStore.getSubscriptionPricing?.() || {};
+    const pricing = await getSubscriptionPricingPersistent(this.prisma);
     const unpaidUsers = withExtras.filter((u: any) => {
       const role = String(u.role || '');
       if (role === 'SUPER_ADMIN' || role === 'PATIENT') return false;
@@ -798,16 +806,19 @@ export class AdminController {
 
   @Get('subscription-pricing')
   async subscriptionPricing() {
-    return InMemoryStore.getSubscriptionPricing();
+    return getSubscriptionPricingPersistent(this.prisma);
   }
 
   @Put('subscription-pricing')
   async updateSubscriptionPricing(@Req() req: any, @Body() body: any) {
-    const updated = InMemoryStore.setSubscriptionPricing(body || {});
+    const updated = await updateSubscriptionPricingPersistent(this.prisma, body || {});
     InMemoryStore.logAudit({
       action: 'SUBSCRIPTION_PRICING_UPDATED',
       targetId: req.user?.userId,
       createdAt: new Date().toISOString(),
+      details: {
+        updatedBy: req.user?.userId,
+      },
     });
     return updated;
   }
@@ -1436,6 +1447,20 @@ export class AdminController {
     };
   }
 
+  private buildAiVoiceConfig(flags: Record<string, any> = {}) {
+    const options = getConfiguredAiVoiceModels(process.env);
+    const selectedModel = resolveAiVoiceModel(
+      flags?.aiVoiceDefaultModel,
+      options,
+      process.env.PIPER_MODEL,
+    );
+    return {
+      selectedModel: selectedModel || null,
+      options,
+      configured: options.length > 0,
+    };
+  }
+
   private normalizeStatus(value: any, fallback = 'OPEN') {
     const text = String(value || fallback).trim().toUpperCase();
     return text || fallback;
@@ -1491,7 +1516,7 @@ export class AdminController {
   private async buildRevenueIntel() {
     const payments = InMemoryStore.list('payments') as any[];
     const subscriptions = InMemoryStore.list('subscriptions') as any[];
-    const pricing = InMemoryStore.getSubscriptionPricing?.() || {};
+    const pricing = await getSubscriptionPricingPersistent(this.prisma);
     const users = await this.prisma.user.findMany({
       select: { id: true, role: true, createdAt: true },
     });
@@ -2258,6 +2283,72 @@ export class AdminController {
       flags: this.defaultFeatureFlags(),
       version: 1,
     });
+  }
+
+  @Get('ai-voice/config')
+  async getAiVoiceConfig(@Req() req: any) {
+    await this.assertPermission(req, 'FEATURE_FLAGS_MANAGE');
+    const singleton = (await this.ensureSingleton('featureFlags', {
+      flags: this.defaultFeatureFlags(),
+      version: 1,
+    })) as any;
+    const flags = singleton?.flags || {};
+    const voiceConfig = this.buildAiVoiceConfig(flags);
+    return {
+      ...voiceConfig,
+      updatedAt: singleton?.updatedAt || null,
+    };
+  }
+
+  @Put('ai-voice/config')
+  async updateAiVoiceConfig(@Req() req: any, @Body() body: any) {
+    await this.assertPermission(req, 'FEATURE_FLAGS_MANAGE');
+    const requestedModel = String(body?.model || '').trim();
+    if (!requestedModel) {
+      throw new BadRequestException('model is required.');
+    }
+
+    const singleton = (await this.ensureSingleton('featureFlags', {
+      flags: this.defaultFeatureFlags(),
+      version: 1,
+    })) as any;
+    const currentFlags = singleton?.flags || {};
+    const voiceConfig = this.buildAiVoiceConfig(currentFlags);
+    const allowedModels = new Set(voiceConfig.options.map((item) => item.model));
+
+    if (!allowedModels.has(requestedModel)) {
+      throw new BadRequestException(
+        'Selected voice model is not in PIPER_MODEL_VARIANTS/PIPER_MODEL configuration.',
+      );
+    }
+
+    const flags = {
+      ...this.defaultFeatureFlags(),
+      ...currentFlags,
+      aiVoiceDefaultModel: requestedModel,
+    };
+
+    const updated = await this.dbUpdate('featureFlag', singleton.id, {
+      flags,
+      version: Number(singleton.version || 1) + 1,
+      updatedBy: req.user?.userId || null,
+      updatedAt: new Date(),
+    } as any, 'featureFlags');
+
+    InMemoryStore.logAudit({
+      action: 'ADMIN_AI_VOICE_DEFAULT_UPDATED',
+      targetId: singleton.id,
+      by: req.user?.userId,
+      createdAt: new Date().toISOString(),
+      details: { model: requestedModel },
+    });
+
+    const nextFlags = (updated as any)?.flags || flags;
+    const nextConfig = this.buildAiVoiceConfig(nextFlags);
+    return {
+      ...nextConfig,
+      updatedAt: (updated as any)?.updatedAt || null,
+    };
   }
 
   @Put('feature-flags')

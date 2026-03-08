@@ -19,6 +19,9 @@ import { mkdirSync } from 'fs';
 import { AiVapiService } from './ai-vapi.service';
 import { AiLocalVoiceService } from './ai-local-voice.service';
 import { AiService } from './ai.service';
+import { PrismaService } from 'src/database/prisma.service';
+import { InMemoryStore } from 'src/common/in-memory.store';
+import { resolveAiVoiceModel } from 'src/common/ai-voice-models';
 
 @Controller('ai/voice')
 @UseGuards(AuthGuard('jwt'))
@@ -27,7 +30,32 @@ export class AiVoiceController {
     private readonly voice: AiVapiService,
     private readonly localVoice: AiLocalVoiceService,
     private readonly aiService: AiService,
+    private readonly prisma: PrismaService,
   ) {}
+
+  private async getAdminSelectedVoiceModel() {
+    const defaultModel = this.localVoice.getDefaultTtsModel();
+    try {
+      const db = this.prisma as any;
+      const singleton = await db?.featureFlag?.findFirst?.({
+        orderBy: { createdAt: 'asc' },
+      });
+      const flags = singleton?.flags || {};
+      return resolveAiVoiceModel(
+        flags?.aiVoiceDefaultModel,
+        this.localVoice.getConfiguredVoices(),
+        defaultModel,
+      );
+    } catch {
+      const localSingleton = (InMemoryStore.list('featureFlags') as any[])[0] || {};
+      const flags = localSingleton?.flags || {};
+      return resolveAiVoiceModel(
+        flags?.aiVoiceDefaultModel,
+        this.localVoice.getConfiguredVoices(),
+        defaultModel,
+      );
+    }
+  }
 
   private async ensureVoiceAccess(user: any) {
     const access = await this.aiService.getAccessState(user);
@@ -38,7 +66,17 @@ export class AiVoiceController {
 
   @Get('local-status')
   async localStatus() {
-    return this.localVoice.getStatus();
+    const [status, selectedModel] = await Promise.all([
+      this.localVoice.getStatus(),
+      this.getAdminSelectedVoiceModel(),
+    ]);
+    return {
+      ...status,
+      tts: {
+        ...(status?.tts || {}),
+        selectedModel: selectedModel || null,
+      },
+    };
   }
 
   @Post('session')
@@ -59,7 +97,13 @@ export class AiVoiceController {
   @Post('tts')
   async textToSpeech(@Req() req: any, @Body() body: any) {
     await this.ensureVoiceAccess(req.user);
-    return this.localVoice.synthesize(body || {});
+    const payload = {
+      ...(body || {}),
+    };
+    if (!payload?.model) {
+      payload.model = await this.getAdminSelectedVoiceModel();
+    }
+    return this.localVoice.synthesize(payload);
   }
 
   @Post('stt')

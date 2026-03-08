@@ -213,6 +213,44 @@ export class AiVoiceToolsService {
     return result;
   }
 
+  async appointmentCopilot(args: any, context: VoiceContext) {
+    return this.aiService.appointmentCopilot(
+      {
+        ...args,
+      },
+      { userId: context.userId, role: context.role },
+    );
+  }
+
+  async medicationSafety(args: any, context: VoiceContext) {
+    return this.aiService.medicationSafety(
+      {
+        ...args,
+        patientId: args?.patientId || context.userId,
+      },
+      { userId: context.userId, role: context.role },
+    );
+  }
+
+  async stockForecast(args: any, context: VoiceContext) {
+    return this.aiService.stockForecastCopilot(
+      {
+        ...args,
+      },
+      { userId: context.userId, role: context.role },
+    );
+  }
+
+  async knowledgeHelp(args: any, context: VoiceContext) {
+    return this.aiService.knowledgeHelp(
+      {
+        query: args?.query || args?.question || args?.prompt || '',
+        topic: args?.topic || '',
+      },
+      { userId: context.userId, role: context.role },
+    );
+  }
+
   async getEmergencyContacts(args: any, context: VoiceContext) {
     const userId = context.userId;
     const user = await this.prisma.user.findUnique({

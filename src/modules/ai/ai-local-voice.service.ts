@@ -10,6 +10,10 @@ import { existsSync, mkdirSync } from 'fs';
 import { promises as fsp } from 'fs';
 import { tmpdir } from 'os';
 import { basename, join } from 'path';
+import {
+  getConfiguredAiVoiceModels,
+  resolveAiVoiceModel,
+} from 'src/common/ai-voice-models';
 
 type ProcessRunOptions = {
   stdin?: string;
@@ -30,6 +34,14 @@ export class AiLocalVoiceService {
   private readonly piperModel = String(process.env.PIPER_MODEL || '').trim();
   private readonly whisperBin = String(process.env.WHISPER_CPP_BIN || 'whisper-cli').trim();
   private readonly whisperModel = String(process.env.WHISPER_CPP_MODEL || '').trim();
+
+  getConfiguredVoices() {
+    return getConfiguredAiVoiceModels(process.env);
+  }
+
+  getDefaultTtsModel() {
+    return resolveAiVoiceModel('', this.getConfiguredVoices(), this.piperModel);
+  }
 
   private async runProcess(
     command: string,
@@ -107,7 +119,7 @@ export class AiLocalVoiceService {
   }
 
   private ensurePiperModel(model?: string) {
-    const resolved = String(model || this.piperModel || '').trim();
+    const resolved = resolveAiVoiceModel(model, this.getConfiguredVoices(), this.piperModel);
     if (!resolved) {
       throw new BadRequestException(
         'Local TTS is not configured. Set PIPER_MODEL in backend .env.',
@@ -142,6 +154,8 @@ export class AiLocalVoiceService {
     const piperAvailable = await this.probeBinary(this.piperBin);
     const whisperAvailable = await this.probeBinary(this.whisperBin);
     const support = this.getWhisperLanguageSupport(this.whisperModel);
+    const voiceOptions = this.getConfiguredVoices();
+    const defaultVoiceModel = resolveAiVoiceModel('', voiceOptions, this.piperModel);
     return {
       provider: 'medilink-local-voice',
       tts: {
@@ -149,7 +163,9 @@ export class AiLocalVoiceService {
         binary: this.piperBin,
         binaryAvailable: piperAvailable,
         model: this.piperModel || null,
+        defaultModel: defaultVoiceModel || null,
         configured: Boolean(this.piperModel),
+        options: voiceOptions,
       },
       stt: {
         engine: 'whisper.cpp',

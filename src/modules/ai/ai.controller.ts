@@ -31,15 +31,63 @@ export class AiController {
   }
 
   @UseGuards(AuthGuard('jwt'))
+  @Post('appointment-copilot')
+  async appointmentCopilot(@Req() req: any, @Body() body: any) {
+    return this.aiService.appointmentCopilot(body, req.user);
+  }
+
+  @UseGuards(AuthGuard('jwt'))
+  @Post('medical-record-summary')
+  async medicalRecordSummary(@Req() req: any, @Body() body: any) {
+    return this.aiService.summarizeHealthStatus(body, req.user);
+  }
+
+  @UseGuards(AuthGuard('jwt'))
+  @Post('medication-safety')
+  async medicationSafety(@Req() req: any, @Body() body: any) {
+    return this.aiService.medicationSafety(body, req.user);
+  }
+
+  @UseGuards(AuthGuard('jwt'))
+  @Post('stock-forecast')
+  async stockForecast(@Req() req: any, @Body() body: any) {
+    return this.aiService.stockForecastCopilot(body, req.user);
+  }
+
+  @UseGuards(AuthGuard('jwt'))
   @Post('app-help')
   async appHelp(@Req() req: any, @Body() body: any) {
     return this.aiService.appHelp(body, req.user);
   }
 
   @UseGuards(AuthGuard('jwt'))
+  @Post('knowledge-help')
+  async knowledgeHelp(@Req() req: any, @Body() body: any) {
+    return this.aiService.knowledgeHelp(body, req.user);
+  }
+
+  @UseGuards(AuthGuard('jwt'))
   @Post('help-desk')
   async helpDesk(@Req() req: any, @Body() body: any) {
     return this.aiService.helpDesk(body, req.user);
+  }
+
+  @UseGuards(AuthGuard('jwt'))
+  @Post('admin/ops-copilot')
+  async adminOpsCopilot(@Req() req: any, @Body() body: any) {
+    return this.aiService.helpDesk(body, req.user);
+  }
+
+  @UseGuards(AuthGuard('jwt'))
+  @Post('translate')
+  async translate(@Req() req: any, @Body() body: any) {
+    return this.aiService.translateText(body, req.user);
+  }
+
+  @UseGuards(AuthGuard('jwt'))
+  @Post('chat-assist')
+  async chatAssist(@Req() req: any, @Body() body: any) {
+    return this.aiService.chatAssist(body, req.user);
   }
 
   @UseGuards(AuthGuard('jwt'))

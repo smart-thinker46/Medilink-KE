@@ -453,6 +453,17 @@ model FeatureFlag {
   @@map("feature_flags")
 }
 
+model SubscriptionPricing {
+  id        String   @id @default(uuid())
+  role      String   @unique
+  monthly   Int      @default(0)
+  yearly    Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("subscription_pricing")
+}
+
 model PaymentDispute {
   id        String   @id @default(uuid())
   paymentId String?

@@ -1321,6 +1321,688 @@ export class AiService {
     };
   }
 
+  private parseMedicationList(value: unknown) {
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .slice(0, 40);
+    }
+    return String(value || '')
+      .split(/[,\n;|/]+/)
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+      .slice(0, 40);
+  }
+
+  private buildMedicationInteractions(medicationsInput: string[]) {
+    const medications = medicationsInput.map((item) => String(item || '').trim()).filter(Boolean);
+    const tokens = medications.map((item) => item.toUpperCase());
+    const rules = [
+      {
+        a: 'WARFARIN',
+        b: 'ASPIRIN',
+        severity: 'HIGH',
+        message: 'Increased bleeding risk when Warfarin is combined with Aspirin.',
+      },
+      {
+        a: 'IBUPROFEN',
+        b: 'PREDNISOLONE',
+        severity: 'MEDIUM',
+        message: 'GI irritation risk increases when Ibuprofen is combined with Prednisolone.',
+      },
+      {
+        a: 'METFORMIN',
+        b: 'ALCOHOL',
+        severity: 'MEDIUM',
+        message: 'Metformin with alcohol may increase lactic acidosis risk.',
+      },
+      {
+        a: 'AZITHROMYCIN',
+        b: 'ONDANSETRON',
+        severity: 'MEDIUM',
+        message: 'Combined use can increase risk of QT prolongation.',
+      },
+      {
+        a: 'SILDENAFIL',
+        b: 'NITROGLYCERIN',
+        severity: 'HIGH',
+        message: 'Severe hypotension risk when Sildenafil is combined with nitrates.',
+      },
+    ];
+
+    const interactions = rules
+      .filter((rule) => tokens.includes(rule.a) && tokens.includes(rule.b))
+      .map((rule) => ({
+        pair: [rule.a, rule.b],
+        severity: rule.severity,
+        message: rule.message,
+      }));
+
+    const seen = new Set<string>();
+    const duplicates = medications
+      .map((item) => item.toUpperCase())
+      .filter((item) => {
+        if (seen.has(item)) return true;
+        seen.add(item);
+        return false;
+      });
+
+    return {
+      medications,
+      interactions,
+      duplicates: Array.from(new Set(duplicates)),
+      safe: interactions.length === 0 && duplicates.length === 0,
+    };
+  }
+
+  async medicationSafety(payload: any, user: any) {
+    await this.ensureAiAccess(user);
+
+    const requesterId = String(user?.userId || '');
+    const requesterRole = this.normalizeRole(user?.role);
+    const patientId = String(payload?.patientId || requesterId).trim();
+    if (!patientId) {
+      throw new BadRequestException('patientId is required.');
+    }
+
+    if (requesterRole === 'PATIENT' && patientId !== requesterId) {
+      throw new ForbiddenException('Patients can only run medication safety for their own account.');
+    }
+
+    const medications = this.parseMedicationList(payload?.medications);
+    if (!medications.length) {
+      throw new BadRequestException('Provide at least one medication to check.');
+    }
+
+    const extras = (await getProfileExtras(this.prisma, patientId)) as any;
+    const allergies = this.parseMedicationList(payload?.allergies || extras?.allergies || '');
+    const chronicConditions = this.parseMedicationList(
+      payload?.chronicConditions || extras?.chronicCondition || '',
+    );
+
+    const base = this.buildMedicationInteractions(medications);
+    const warnings: string[] = [];
+    if (allergies.length) {
+      const allergyHits = base.medications.filter((med) =>
+        allergies.some((allergy) => med.toLowerCase().includes(allergy.toLowerCase())),
+      );
+      if (allergyHits.length) {
+        warnings.push(
+          `Possible allergy conflict with: ${Array.from(new Set(allergyHits)).join(', ')}.`,
+        );
+      }
+    }
+    if (base.duplicates.length) {
+      warnings.push(`Duplicate medications detected: ${base.duplicates.join(', ')}.`);
+    }
+    if (chronicConditions.length) {
+      warnings.push(
+        `Chronic condition context: ${chronicConditions.slice(0, 4).join(', ')}. Confirm suitability with clinician.`,
+      );
+    }
+
+    const highRisk = base.interactions.filter((item) => String(item.severity).toUpperCase() === 'HIGH')
+      .length;
+    const mediumRisk = base.interactions.filter(
+      (item) => String(item.severity).toUpperCase() === 'MEDIUM',
+    ).length;
+    const riskLevel = highRisk > 0 ? 'HIGH' : mediumRisk > 0 || warnings.length ? 'MEDIUM' : 'LOW';
+
+    const fallbackSummary =
+      riskLevel === 'HIGH'
+        ? 'High-risk interaction signals detected. Consult a licensed medic or pharmacist before use.'
+        : riskLevel === 'MEDIUM'
+          ? 'Potential medication safety concerns found. Verify doses and combinations with a clinician.'
+          : 'No major interaction was detected from the current rule set.';
+
+    const advice = await this.askJson<{
+      summary: string;
+      recommendations: string[];
+      redFlags: string[];
+    }>(
+      [
+        'You are a medication safety assistant.',
+        'Use conservative language and never diagnose.',
+        'Output concise clinical-safety guidance only.',
+      ].join(' '),
+      [
+        `Medications: ${JSON.stringify(base.medications)}`,
+        `Interactions: ${JSON.stringify(base.interactions)}`,
+        `Warnings: ${JSON.stringify(warnings)}`,
+        `Risk level: ${riskLevel}`,
+        'Return JSON: { "summary": "...", "recommendations": [], "redFlags": [] }',
+      ].join('\n'),
+      {
+        summary: fallbackSummary,
+        recommendations: [
+          'Confirm all medicines and doses with your clinician or pharmacist.',
+          'Avoid self-medication when interaction risk is medium/high.',
+          'Seek urgent care if severe side effects occur.',
+        ],
+        redFlags: highRisk
+          ? ['Potential severe interaction identified.']
+          : ['No severe interaction identified from current rule set.'],
+      },
+    );
+
+    const summaryText = String(advice?.summary || fallbackSummary).trim() || fallbackSummary;
+    const recommendations = this.toTextList(advice?.recommendations, 8);
+    const redFlags = this.toTextList(advice?.redFlags, 8);
+    const speechText = this.buildSpeechText([
+      `Medication safety check complete. Risk level: ${riskLevel}.`,
+      summaryText,
+      this.listSpeechChunk('Red flags', redFlags, 4),
+      this.listSpeechChunk('Recommendations', recommendations, 4),
+    ]);
+
+    return {
+      patientId,
+      medications: base.medications,
+      allergies,
+      chronicConditions,
+      riskLevel,
+      safe: base.safe && riskLevel === 'LOW',
+      interactions: base.interactions,
+      warnings,
+      redFlags,
+      recommendations,
+      summary: summaryText,
+      speechText,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  private normalizeDateInput(value: unknown) {
+    const raw = String(value || '').trim();
+    if (!raw) return new Date();
+    const parsed = new Date(raw);
+    if (!Number.isFinite(parsed.getTime())) return new Date();
+    return parsed;
+  }
+
+  private buildAvailableSlots(
+    date: string,
+    medicId: string,
+    bookedAppointments: any[],
+    candidateSlots: string[],
+  ) {
+    const booked = new Set(
+      bookedAppointments
+        .filter(
+          (item) =>
+            String(item?.medicId || '').trim() === String(medicId || '').trim() &&
+            String(item?.date || '').trim() === String(date || '').trim(),
+        )
+        .map((item) => String(item?.time || '').trim()),
+    );
+
+    return candidateSlots.filter((slot) => !booked.has(slot)).slice(0, 4);
+  }
+
+  async appointmentCopilot(payload: any, user: any) {
+    await this.ensureAiAccess(user);
+
+    const query = String(
+      [
+        payload?.query,
+        payload?.symptoms,
+        payload?.specialization,
+        payload?.location,
+        payload?.preferredDate ? `date ${payload.preferredDate}` : '',
+        payload?.maxBudget ? `under ${payload.maxBudget}` : '',
+      ]
+        .filter(Boolean)
+        .join(' '),
+    )
+      .trim()
+      .replace(/\s+/g, ' ');
+
+    if (!query) {
+      throw new BadRequestException(
+        'Provide query, symptoms, specialization, or location for appointment copilot.',
+      );
+    }
+
+    const include = Array.isArray(payload?.include) && payload.include.length
+      ? payload.include
+      : ['medic', 'hospital'];
+    const search = await this.smartSearch(
+      {
+        query,
+        include,
+        limit: Math.min(Math.max(Number(payload?.limit || 10), 3), 20),
+      },
+      user,
+    );
+
+    const preferredDate = this.normalizeDateInput(payload?.preferredDate);
+    const dateIso = preferredDate.toISOString().slice(0, 10);
+    const defaultSlots = ['09:00', '10:30', '12:00', '14:00', '16:00', '17:30'];
+    const candidateSlots = this.parseMedicationList(payload?.preferredSlots).length
+      ? this.parseMedicationList(payload?.preferredSlots)
+      : defaultSlots;
+    const bookedAppointments = InMemoryStore.list('appointments') as any[];
+
+    const top = (Array.isArray(search?.results) ? search.results : []).slice(0, 10);
+    const recommendations = top.map((item: any) => {
+      const entry: Record<string, any> = {
+        id: item?.id,
+        type: item?.type,
+        name: item?.name,
+        subtitle: item?.subtitle || '',
+        score: Number(item?.score || 0),
+        reason: item?.reason || '',
+      };
+      if (String(item?.type || '').toLowerCase() === 'medic') {
+        const slots = this.buildAvailableSlots(dateIso, String(item?.id || ''), bookedAppointments, candidateSlots);
+        entry.availableSlots = slots;
+        entry.booking = {
+          route: '/(app)/(patient)/book-appointment',
+          params: {
+            medic_id: item?.id,
+            date: dateIso,
+            time: slots[0] || candidateSlots[0] || '09:00',
+          },
+        };
+      }
+      return entry;
+    });
+
+    const summary =
+      recommendations.length > 0
+        ? `Found ${recommendations.length} matching provider option(s). Top matches are ready for booking guidance.`
+        : 'No suitable provider match found. Try refining specialization, location, or budget.';
+    const speechText = this.buildSpeechText([
+      summary,
+      recommendations.length
+        ? `Top recommendation: ${String(recommendations[0]?.name || 'provider')}.`
+        : '',
+      recommendations[0]?.availableSlots?.length
+        ? `Available slots include ${recommendations[0].availableSlots.slice(0, 3).join(', ')}.`
+        : '',
+      'Would you like me to narrow results by location, specialization, or price?',
+    ]);
+
+    return {
+      query,
+      preferredDate: dateIso,
+      recommendations,
+      notes: String(search?.notes || '').trim(),
+      summary,
+      speechText,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  private async resolveStockForecastPharmacyIds(payload: any, user: any) {
+    const explicit = this.parseMedicationList(payload?.pharmacyIds || payload?.pharmacyId);
+    if (explicit.length) return explicit;
+
+    const role = this.normalizeRole(user?.role);
+    const userId = String(user?.userId || '').trim();
+    if (!userId) return [];
+
+    if (role === 'PHARMACY_ADMIN') {
+      const links = await this.prisma.tenantUser.findMany({
+        where: { userId },
+        select: { tenantId: true },
+      });
+      return Array.from(new Set(links.map((item) => String(item.tenantId || '').trim()).filter(Boolean)));
+    }
+
+    if (role === 'SUPER_ADMIN') {
+      const products = await (this.prisma as any).product.findMany({
+        select: { pharmacyId: true },
+        take: 500,
+      });
+      return Array.from(
+        new Set(
+          products
+            .map((item: any) => String(item?.pharmacyId || '').trim())
+            .filter((id: string) => id.length > 0),
+        ),
+      ).slice(0, 25);
+    }
+
+    return [];
+  }
+
+  async stockForecastCopilot(payload: any, user: any) {
+    await this.ensureAiAccess(user);
+
+    const role = this.normalizeRole(user?.role);
+    if (!['PHARMACY_ADMIN', 'HOSPITAL_ADMIN', 'SUPER_ADMIN'].includes(role)) {
+      throw new ForbiddenException('Stock forecast copilot is available for pharmacy/hospital/admin roles.');
+    }
+
+    const pharmacyIds = await this.resolveStockForecastPharmacyIds(payload, user);
+    if (!pharmacyIds.length) {
+      throw new BadRequestException('Provide pharmacyId or ensure your account is linked to a pharmacy.');
+    }
+
+    const windowDays = Math.min(Math.max(Number(payload?.windowDays || 30), 7), 120);
+    const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
+
+    const [products, movements] = await Promise.all([
+      (this.prisma as any).product.findMany({
+        where: { pharmacyId: { in: pharmacyIds } },
+        orderBy: { createdAt: 'desc' },
+        take: 1200,
+      }),
+      (this.prisma as any).stockMovement.findMany({
+        where: {
+          pharmacyId: { in: pharmacyIds },
+          createdAt: { gte: since },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 5000,
+      }),
+    ]);
+
+    const soldByProduct: Record<string, number> = {};
+    movements.forEach((movement: any) => {
+      const productId = String(movement?.productId || '').trim();
+      if (!productId) return;
+      const type = String(movement?.type || '').toUpperCase();
+      const delta = Number(movement?.quantityChange || 0);
+      const isSale = type === 'SALE' || delta < 0;
+      if (!isSale) return;
+      soldByProduct[productId] = (soldByProduct[productId] || 0) + Math.abs(delta);
+    });
+
+    const predictions = products
+      .map((product: any) => {
+        const productId = String(product?.id || '');
+        const soldUnits = Number(soldByProduct[productId] || 0);
+        const avgDailyDemand = soldUnits / windowDays;
+        const forecast7d = Math.ceil(avgDailyDemand * 7);
+        const forecast30d = Math.ceil(avgDailyDemand * 30);
+        const currentStock = Number(product?.stock ?? product?.numberInStock ?? product?.quantity ?? 0);
+        const reorderLevel = Number(product?.reorderLevel ?? 5);
+        const stockOutInDays = avgDailyDemand > 0 ? Math.floor(currentStock / avgDailyDemand) : null;
+        const recommendedQty = Math.max(
+          reorderLevel * 2 - currentStock,
+          forecast30d - currentStock,
+          0,
+        );
+        const riskScore =
+          (currentStock <= 0 ? 50 : 0) +
+          (currentStock <= reorderLevel ? 25 : 0) +
+          (forecast7d > currentStock ? 20 : 0) +
+          (stockOutInDays !== null && stockOutInDays <= 7 ? 15 : 0);
+
+        return {
+          productId,
+          pharmacyId: String(product?.pharmacyId || ''),
+          name: String(product?.name || product?.productName || 'Product'),
+          soldUnits,
+          avgDailyDemand: Number(avgDailyDemand.toFixed(2)),
+          forecast7d,
+          forecast30d,
+          currentStock,
+          reorderLevel,
+          stockOutInDays,
+          recommendedQty,
+          riskScore,
+        };
+      })
+      .sort((a, b) => b.riskScore - a.riskScore)
+      .slice(0, 50);
+
+    const urgent = predictions.filter((item) => item.riskScore >= 40).slice(0, 15);
+    const totalRecommendedQty = predictions.reduce((sum, item) => sum + Number(item.recommendedQty || 0), 0);
+    const summary = `Stock forecast analyzed ${products.length} product(s) across ${pharmacyIds.length} pharmacy scope(s).`;
+    const recommendations = [
+      urgent.length
+        ? `Prioritize ${urgent.length} high-risk product(s) for immediate restock.`
+        : 'No critical stockout risk detected in the current window.',
+      `Total suggested reorder quantity: ${totalRecommendedQty} unit(s).`,
+      'Review fast-moving products weekly and update reorder levels monthly.',
+    ];
+    const speechText = this.buildSpeechText([
+      summary,
+      recommendations[0],
+      recommendations[1],
+    ]);
+
+    return {
+      windowDays,
+      pharmacyIds,
+      summary,
+      recommendations,
+      urgent,
+      predictions,
+      speechText,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  private knowledgeBaseCatalog(role: string) {
+    const shared = [
+      {
+        id: 'kb-ai-finder',
+        module: 'AI Finder',
+        tags: ['ai', 'finder', 'search', 'medic', 'pharmacy', 'hospital', 'medicine'],
+        content:
+          'AI Finder helps users discover medicines, pharmacies, medics, and facilities using natural language or voice input. Use specific location, specialization, and budget terms for better results.',
+      },
+      {
+        id: 'kb-chat-translate',
+        module: 'Chat Translation',
+        tags: ['chat', 'translate', 'voice', 'transcribe', 'language'],
+        content:
+          'Chat supports speech-to-text transcription and translation. Users can toggle translation mode and pick target language, then listen to translated text using in-app voice playback.',
+      },
+      {
+        id: 'kb-ai-premium',
+        module: 'AI Access',
+        tags: ['premium', 'subscription', 'payment', 'unlock'],
+        content:
+          'AI features are premium-gated for non-admin roles. If access is locked, complete subscription checkout and ensure AI is enabled in settings.',
+      },
+      {
+        id: 'kb-security',
+        module: 'Security',
+        tags: ['security', 'password', 'otp', 'login'],
+        content:
+          'Login supports OTP and password rotation policy. Users should maintain strong passwords and use verified email for account recovery.',
+      },
+    ];
+
+    const roleSpecific: Record<string, Array<{ id: string; module: string; tags: string[]; content: string }>> = {
+      PATIENT: [
+        {
+          id: 'kb-patient-booking',
+          module: 'Patient Booking',
+          tags: ['patient', 'appointment', 'book', 'medic'],
+          content:
+            'Patients can search medics, open profile, and book appointments by date/time. Appointment history is available in patient dashboard.',
+        },
+        {
+          id: 'kb-patient-pharmacy',
+          module: 'Patient Pharmacy',
+          tags: ['patient', 'pharmacy', 'medicine', 'order', 'cart'],
+          content:
+            'Patients can browse pharmacy stock, add products to cart, and place orders. Use AI search for medicine availability and nearest options.',
+        },
+      ],
+      MEDIC: [
+        {
+          id: 'kb-medic-workflow',
+          module: 'Medic Workflow',
+          tags: ['medic', 'appointments', 'records', 'patients'],
+          content:
+            'Medics manage appointment queues, review patient records, and update clinical notes. AI can summarize records and support referral search.',
+        },
+      ],
+      HOSPITAL_ADMIN: [
+        {
+          id: 'kb-hospital-ops',
+          module: 'Hospital Operations',
+          tags: ['hospital', 'shift', 'staffing', 'analytics'],
+          content:
+            'Hospital admins manage shifts, staffing, appointments, and operational analytics. AI can summarize operations and assist prioritization.',
+        },
+      ],
+      PHARMACY_ADMIN: [
+        {
+          id: 'kb-pharmacy-ops',
+          module: 'Pharmacy Operations',
+          tags: ['pharmacy', 'stock', 'orders', 'forecast', 'reorder'],
+          content:
+            'Pharmacy admins manage stock, orders, and low-stock alerts. Stock forecast copilot recommends reorder quantities based on recent demand.',
+        },
+      ],
+      SUPER_ADMIN: [
+        {
+          id: 'kb-admin-copilot',
+          module: 'Admin Ops Copilot',
+          tags: ['admin', 'ops', 'automation', 'users', 'email', 'analytics'],
+          content:
+            'Admin ops copilot can filter users, draft emails, summarize analytics, and prepare operational actions. Execute mode is required for write actions.',
+        },
+      ],
+    };
+
+    return [...shared, ...(roleSpecific[role] || [])];
+  }
+
+  private retrieveKnowledgeSnippets(query: string, role: string, limit = 5) {
+    const catalog = this.knowledgeBaseCatalog(role);
+    const q = String(query || '').trim();
+    return catalog
+      .map((item) => {
+        const searchable = `${item.module} ${item.tags.join(' ')} ${item.content}`;
+        const score = this.scoreCandidate(q, searchable);
+        return { ...item, score };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+  }
+
+  async knowledgeHelp(payload: any, user: any) {
+    await this.ensureAiAccess(user);
+    const query = String(payload?.query || payload?.question || '').trim();
+    if (!query) {
+      throw new BadRequestException('query is required.');
+    }
+
+    const role = this.normalizeRole(user?.role);
+    const snippets = this.retrieveKnowledgeSnippets(query, role, 6);
+    const fallbackGuide = this.buildAppUsageGuide(role, payload?.topic, query);
+    const fallbackAnswer = `${fallbackGuide.title}. ${fallbackGuide.summary}`;
+
+    const answer = await this.askText(
+      [
+        'You are Medilink AI knowledge help assistant.',
+        'Use only provided knowledge snippets and role context.',
+        'If uncertain, explicitly say what screen/module to open next.',
+      ].join(' '),
+      [
+        `Role: ${role}`,
+        `Question: ${query}`,
+        `Knowledge snippets JSON: ${JSON.stringify(snippets)}`,
+        `Fallback guide JSON: ${JSON.stringify(fallbackGuide)}`,
+      ].join('\n'),
+      fallbackAnswer,
+    );
+
+    const finalAnswer = String(answer || '').trim() || fallbackAnswer;
+    return {
+      query,
+      answer: finalAnswer,
+      speechText: this.buildSpeechText([finalAnswer]),
+      sources: snippets.map((item) => ({
+        id: item.id,
+        module: item.module,
+        score: item.score,
+      })),
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  async chatAssist(payload: any, user: any) {
+    await this.ensureAiAccess(user);
+
+    const mode = String(payload?.mode || 'translate').trim().toLowerCase();
+    const text = String(payload?.text || '').trim();
+    if (!text) {
+      throw new BadRequestException('text is required.');
+    }
+
+    if (mode === 'translate') {
+      const translated = await this.translateText(
+        {
+          text,
+          sourceLanguage: payload?.sourceLanguage || 'auto',
+          targetLanguage: payload?.targetLanguage || 'en',
+        },
+        user,
+      );
+      return {
+        mode,
+        ...translated,
+        speechText: this.buildSpeechText([translated?.text || '']),
+        generatedAt: new Date().toISOString(),
+      };
+    }
+
+    if (mode === 'summarize') {
+      const summary = await this.askJson<{ summary: string; keyPoints: string[] }>(
+        [
+          'You summarize chat messages for quick readability.',
+          'Be concise and preserve key intent.',
+        ].join(' '),
+        [
+          `Input text: ${text}`,
+          'Return JSON: { "summary": "...", "keyPoints": [] }',
+        ].join('\n'),
+        {
+          summary: text.slice(0, 280),
+          keyPoints: [],
+        },
+      );
+
+      const summaryText = String(summary?.summary || text.slice(0, 280)).trim();
+      return {
+        mode,
+        originalText: text,
+        summary: summaryText,
+        keyPoints: this.toTextList(summary?.keyPoints, 8),
+        speechText: this.buildSpeechText([summaryText]),
+        generatedAt: new Date().toISOString(),
+      };
+    }
+
+    const role = this.normalizeRole(user?.role);
+    const snippets = this.retrieveKnowledgeSnippets(text, role, 4);
+    const reply = await this.askText(
+      [
+        'You are Medilink AI chat reply assistant.',
+        'Draft a short, respectful, practical reply.',
+        'Avoid diagnosis and unsafe claims.',
+      ].join(' '),
+      [
+        `Role: ${role}`,
+        `Message: ${text}`,
+        `Useful snippets JSON: ${JSON.stringify(snippets)}`,
+      ].join('\n'),
+      'Thank you for your message. I will help you with the next best step in Medilink.',
+    );
+
+    const replyText = String(reply || '').trim();
+    return {
+      mode: 'reply',
+      originalText: text,
+      reply: replyText,
+      speechText: this.buildSpeechText([replyText]),
+      sources: snippets.map((item) => ({ id: item.id, module: item.module, score: item.score })),
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
   private async buildQuickAssistantContext(user: any) {
     const role = String(user?.role || '').toUpperCase();
     const userId = String(user?.userId || '');
@@ -2387,6 +3069,7 @@ export class AiService {
     const query = String(payload?.query || '').trim();
     if (!query) return { answer: 'Please provide a question.' };
     const role = String(user?.role || '');
+    const knowledgeSnippets = this.retrieveKnowledgeSnippets(query, this.normalizeRole(role), 5);
     if (this.looksLikeAppHelpQuery(query)) {
       const guide = this.buildAppUsageGuide(role, payload?.topic, query);
       const answer = [
@@ -2404,6 +3087,11 @@ export class AiService {
         answer,
         speechText: `${guide.title}. ${guide.summary}`,
         appHelp: guide,
+        sources: knowledgeSnippets.map((item) => ({
+          id: item.id,
+          module: item.module,
+          score: item.score,
+        })),
         generatedAt: new Date().toISOString(),
       };
     }
@@ -2413,13 +3101,14 @@ export class AiService {
       [
         'You are Medilink AI assistant.',
         'Scope: app workflows, analytics interpretation, record summaries, search guidance, and role-based onboarding help.',
-        'Use provided RAG context from Medilink data; if missing, say what data is needed.',
+        'Use provided RAG context from Medilink data and knowledge snippets; if missing, say what data is needed.',
         'When asked about app usage, provide numbered steps and mention the relevant module/screen.',
         'Do not provide diagnosis. Be concise and actionable.',
       ].join(' '),
       [
         `User role: ${role}`,
         `RAG context JSON: ${JSON.stringify(context)}`,
+        `Knowledge snippets JSON: ${JSON.stringify(knowledgeSnippets)}`,
         `Question: ${query}`,
       ].join('\n'),
       'I could not generate an answer.',
@@ -2427,6 +3116,11 @@ export class AiService {
     return {
       answer,
       speechText: String(answer || '').slice(0, 420),
+      sources: knowledgeSnippets.map((item) => ({
+        id: item.id,
+        module: item.module,
+        score: item.score,
+      })),
       generatedAt: new Date().toISOString(),
     };
   }
