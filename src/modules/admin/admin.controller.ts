@@ -355,6 +355,20 @@ export class AdminController {
     const extrasMap = await getProfileExtrasMap(this.prisma, users.map((u) => u.id));
     let list = users.map((user) => {
       const extras = extrasMap.get(user.id) || {};
+      const paidPremium = Boolean(
+        (extras as any).subscriptionActive ||
+          (extras as any).premiumActive ||
+          (extras as any).isPremium,
+      );
+      const aiAccessGrantedByAdmin = Boolean(
+        (extras as any).aiAccessGranted ||
+          (extras as any).aiGrantedByAdmin ||
+          (extras as any).aiUnlockedByAdmin,
+      );
+      const aiEnabled = Boolean((extras as any).aiEnabled || aiAccessGrantedByAdmin);
+      const aiAccessAllowed = Boolean(
+        aiEnabled && (paidPremium || aiAccessGrantedByAdmin || user.role === UserRole.SUPER_ADMIN),
+      );
       return {
         id: user.id,
         firstName: extras.firstName || user.fullName?.split(' ')[0] || '',
@@ -374,6 +388,9 @@ export class AdminController {
         idFront: extras.idFront || extras.idFrontUrl || '',
         idBack: extras.idBack || extras.idBackUrl || '',
         subscriptionActive: Boolean(extras.subscriptionActive),
+        aiEnabled,
+        aiAccessGrantedByAdmin,
+        aiAccessAllowed,
         isOnline: this.notificationsGateway.isUserOnline(user.id),
       };
     });
@@ -1084,6 +1101,56 @@ export class AdminController {
       createdAt: new Date().toISOString(),
     });
     return { success: true };
+  }
+
+  @Put('users/:id/ai-access')
+  async setUserAiAccess(@Req() req: any, @Param('id') id: string, @Body() body: any) {
+    const allowed = Boolean(body?.allowed ?? body?.granted ?? body?.enabled ?? true);
+    const target = await this.prisma.user.findUnique({
+      where: { id },
+      select: { id: true, email: true, fullName: true, role: true },
+    });
+    if (!target) {
+      throw new BadRequestException('User not found.');
+    }
+
+    await mergeProfileExtras(this.prisma, id, {
+      aiAccessGranted: allowed,
+      aiGrantedByAdmin: allowed,
+      aiUnlockedByAdmin: allowed,
+      aiEnabled: allowed ? true : undefined,
+      aiAccessGrantedAt: allowed ? new Date().toISOString() : null,
+      aiAccessGrantedBy: allowed ? req.user?.userId || null : null,
+    });
+
+    const notification = InMemoryStore.create('notifications', {
+      userId: id,
+      title: allowed ? 'AI Access Enabled' : 'AI Access Updated',
+      message: allowed
+        ? 'An administrator enabled AI access for your account.'
+        : 'Administrator AI override was removed from your account.',
+      type: 'ACCOUNT',
+      relatedId: id,
+      isRead: false,
+      createdAt: new Date().toISOString(),
+    });
+    this.notificationsGateway.emitToUser(id, {
+      title: notification.title,
+      message: notification.message,
+    });
+
+    InMemoryStore.logAudit({
+      action: allowed ? 'USER_AI_ACCESS_GRANTED' : 'USER_AI_ACCESS_REVOKED',
+      targetId: id,
+      createdAt: new Date().toISOString(),
+      by: req.user?.userId,
+      metadata: {
+        userEmail: target.email || null,
+        userRole: target.role || null,
+      },
+    });
+
+    return { success: true, userId: id, aiAccessGrantedByAdmin: allowed };
   }
 
   @Put('notifications')

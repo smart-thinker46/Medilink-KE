@@ -18,6 +18,24 @@ services:
         value: "20"
       - key: NODE_ENV
         value: production
+      - key: AI_PROVIDER
+        value: ollama
+      - key: OLLAMA_BASE_URL
+        sync: false
+      - key: OLLAMA_MODEL
+        value: llama3.2:3b
+      - key: OLLAMA_TIMEOUT_MS
+        value: "180000"
+      - key: OLLAMA_NUM_CTX
+        value: "768"
+      - key: OLLAMA_MAX_OUTPUT_TOKENS
+        value: "120"
+      - key: OLLAMA_AUTH_HEADER
+        sync: false
+      - key: OLLAMA_API_KEY
+        sync: false
+      - key: OLLAMA_AUTH_SCHEME
+        value: Bearer
 
       - key: DATABASE_URL
         fromDatabase:

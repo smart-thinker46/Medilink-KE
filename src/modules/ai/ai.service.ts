@@ -36,6 +36,7 @@ export class AiService {
   private readonly geminiApiKey: string;
   private readonly geminiModel: string;
   private readonly ollamaBaseUrl: string;
+  private readonly ollamaAuthHeader: string;
   private readonly ollamaModel: string;
   private readonly ollamaTimeoutMs: number;
   private readonly ollamaNumCtx: number;
@@ -55,6 +56,12 @@ export class AiService {
     this.ollamaBaseUrl = String(process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434')
       .trim()
       .replace(/\/+$/, '');
+    const ollamaAuthHeaderRaw = String(process.env.OLLAMA_AUTH_HEADER || '').trim();
+    const ollamaApiKey = String(process.env.OLLAMA_API_KEY || '').trim();
+    const ollamaAuthScheme = String(process.env.OLLAMA_AUTH_SCHEME || 'Bearer').trim();
+    this.ollamaAuthHeader =
+      ollamaAuthHeaderRaw ||
+      (ollamaApiKey ? `${ollamaAuthScheme} ${ollamaApiKey}`.trim() : '');
 
     this.provider =
       configuredProvider === 'gemini'
@@ -532,8 +539,20 @@ export class AiService {
     return String(response?.data?.output_text || '').trim();
   }
 
+  private ollamaHeaders(includeJsonContentType = false) {
+    const headers: Record<string, string> = {};
+    if (includeJsonContentType) {
+      headers['Content-Type'] = 'application/json';
+    }
+    if (this.ollamaAuthHeader) {
+      headers.Authorization = this.ollamaAuthHeader;
+    }
+    return headers;
+  }
+
   private async listOllamaModels() {
     const response = await axios.get(`${this.ollamaBaseUrl}/api/tags`, {
+      headers: this.ollamaHeaders(),
       timeout: 15000,
     });
     const models = Array.isArray(response?.data?.models) ? response.data.models : [];
@@ -601,7 +620,7 @@ export class AiService {
           ...(expectJson ? { format: 'json' } : {}),
         },
         {
-          headers: { 'Content-Type': 'application/json' },
+          headers: this.ollamaHeaders(true),
           timeout: this.ollamaTimeoutMs,
         },
       );
@@ -630,7 +649,7 @@ export class AiService {
             ...(expectJson ? { format: 'json' } : {}),
           },
           {
-            headers: { 'Content-Type': 'application/json' },
+            headers: this.ollamaHeaders(true),
             timeout: this.ollamaTimeoutMs,
           },
         );
@@ -693,8 +712,11 @@ export class AiService {
     const paidPremium = Boolean(
       extras?.subscriptionActive || extras?.premiumActive || extras?.isPremium,
     );
-    const isPremium = isSuperAdmin || paidPremium;
-    const aiEnabled = isSuperAdmin ? true : Boolean(extras?.aiEnabled);
+    const adminGrantedAccess = Boolean(
+      extras?.aiAccessGranted || extras?.aiGrantedByAdmin || extras?.aiUnlockedByAdmin,
+    );
+    const isPremium = isSuperAdmin || paidPremium || adminGrantedAccess;
+    const aiEnabled = isSuperAdmin ? true : Boolean(extras?.aiEnabled || adminGrantedAccess);
     const providerIssue = this.aiUnavailableReason();
 
     let blockedReason: string | null = null;
@@ -762,6 +784,7 @@ export class AiService {
 
     try {
       const response = await axios.get(`${this.ollamaBaseUrl}/api/tags`, {
+        headers: this.ollamaHeaders(),
         timeout: 5000,
       });
       const models = Array.isArray(response?.data?.models) ? response.data.models : [];
@@ -853,7 +876,10 @@ export class AiService {
     const paidPremium = Boolean(
       extras?.subscriptionActive || extras?.premiumActive || extras?.isPremium,
     );
-    const isPremium = isSuperAdmin || paidPremium;
+    const adminGrantedAccess = Boolean(
+      extras?.aiAccessGranted || extras?.aiGrantedByAdmin || extras?.aiUnlockedByAdmin,
+    );
+    const isPremium = isSuperAdmin || paidPremium || adminGrantedAccess;
     const nextEnabled = Boolean(payload?.enabled);
 
     if (nextEnabled && !isPremium) {
