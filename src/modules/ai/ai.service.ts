@@ -7,7 +7,7 @@ import { NotificationsGateway } from '../notifications/notifications.gateway';
 
 type SearchResult = {
   id: string;
-  type: 'patient' | 'medic' | 'hospital' | 'pharmacy';
+  type: 'patient' | 'medic' | 'hospital' | 'pharmacy' | 'product';
   name: string;
   subtitle?: string;
   score: number;
@@ -26,6 +26,343 @@ type AiAccessState = {
   blockedReason?: string | null;
 };
 
+const MEDIC_QUERY_TERMS = [
+  'medic',
+  'doctor',
+  'physician',
+  'clinician',
+  'specialist',
+  'consultant',
+  'clinic',
+  'general practitioner',
+  'family physician',
+  'internal medicine',
+  'hospitalist',
+  'cardiologist',
+  'interventional cardiologist',
+  'cardiac surgeon',
+  'vascular surgeon',
+  'hematologist',
+  'hematology-oncologist',
+  'neurologist',
+  'neurosurgeon',
+  'neurophysiologist',
+  'stroke specialist',
+  'psychiatrist',
+  'child psychiatrist',
+  'addiction psychiatrist',
+  'orthopedic surgeon',
+  'sports medicine',
+  'rheumatologist',
+  'physical medicine',
+  'pediatrician',
+  'neonatologist',
+  'pediatric cardiologist',
+  'pediatric neurologist',
+  'gynecologist',
+  'obstetrician',
+  'fertility specialist',
+  'maternal-fetal',
+  'dermatologist',
+  'dermatologic surgeon',
+  'ophthalmologist',
+  'optometrist',
+  'retinal specialist',
+  'ent specialist',
+  'otolaryngologist',
+  'audiologist',
+  'head and neck surgeon',
+  'gastroenterologist',
+  'hepatologist',
+  'colorectal surgeon',
+  'nephrologist',
+  'urologist',
+  'urologic surgeon',
+  'pulmonologist',
+  'respiratory specialist',
+  'sleep medicine',
+  'medical oncologist',
+  'radiation oncologist',
+  'surgical oncologist',
+  'general surgeon',
+  'trauma surgeon',
+  'laparoscopic surgeon',
+  'endocrinologist',
+  'diabetologist',
+  'infectious disease',
+  'tropical disease',
+  'emergency medicine',
+  'intensive care',
+  'trauma emergency',
+  'pain management',
+  'palliative care',
+  'dentist',
+  'orthodontist',
+  'oral surgeon',
+  'radiologist',
+  'interventional radiologist',
+  'pathologist',
+  'clinical pathologist',
+  'microbiologist',
+  'anesthesiologist',
+  'pain anesthesiologist',
+  'physiotherapist',
+  'occupational therapist',
+  'epidemiologist',
+  'public health',
+  'geneticist',
+  'allergist',
+  'immunologist',
+  'geriatrician',
+  'plastic surgeon',
+  'cosmetic surgeon',
+  'toxicologist',
+  'aviation medicine',
+  'hyperbaric medicine',
+  'sports physician',
+  'bariatric surgeon',
+  'transplant surgeon',
+  'hand surgeon',
+  'spine surgeon',
+  'pediatric surgeon',
+  'thoracic surgeon',
+  'craniofacial surgeon',
+  'clinical pharmacologist',
+  'rehabilitation physician',
+  'occupational health',
+  'travel medicine',
+  'preventive medicine',
+  'lifestyle medicine',
+  'telemedicine',
+  'integrative medicine',
+  // Swahili phrases
+  'daktari',
+  'daktari wa kawaida',
+  'daktari wa familia',
+  'daktari wa magonjwa ya ndani',
+  'daktari wa wagonjwa waliolazwa hospitalini',
+  'daktari wa moyo',
+  'daktari wa matibabu ya moyo kwa upasuaji mdogo',
+  'daktari wa upasuaji wa moyo',
+  'daktari wa mishipa ya damu',
+  'daktari wa magonjwa ya damu',
+  'daktari wa magonjwa ya damu na saratani',
+  'daktari wa neva',
+  'daktari wa upasuaji wa ubongo na neva',
+  'mtaalamu wa mfumo wa neva',
+  'daktari wa kiharusi',
+  'daktari wa afya ya akili',
+  'daktari wa afya ya akili ya watoto',
+  'daktari wa uraibu wa dawa za kulevya',
+  'daktari wa mifupa',
+  'daktari wa majeraha ya michezo',
+  'daktari wa magonjwa ya viungo',
+  'daktari wa tiba ya mwili',
+  'daktari wa watoto',
+  'daktari wa watoto wachanga',
+  'daktari wa moyo wa watoto',
+  'daktari wa neva wa watoto',
+  'daktari wa wanawake',
+  'daktari wa uzazi',
+  'daktari wa uzazi na uwezo wa kupata mtoto',
+  'daktari wa ujauzito hatarishi',
+  'daktari wa ngozi',
+  'daktari wa upasuaji wa ngozi',
+  'daktari wa macho',
+  'mtaalamu wa macho',
+  'daktari wa retina ya jicho',
+  'daktari wa masikio, pua na koo',
+  'mtaalamu wa kusikia',
+  'daktari wa upasuaji wa kichwa na shingo',
+  'daktari wa tumbo na mfumo wa chakula',
+  'daktari wa ini',
+  'daktari wa utumbo mpana',
+  'daktari wa figo',
+  'daktari wa mfumo wa mkojo',
+  'daktari wa upasuaji wa mfumo wa mkojo',
+  'daktari wa mapafu',
+  'mtaalamu wa kupumua',
+  'daktari wa matatizo ya usingizi',
+  'daktari wa saratani',
+  'daktari wa tiba ya mionzi kwa saratani',
+  'daktari wa upasuaji wa saratani',
+  'daktari wa upasuaji wa kawaida',
+  'daktari wa majeraha makubwa',
+  'daktari wa upasuaji mdogo wa matundu',
+  'daktari wa homoni',
+  'daktari wa kisukari',
+  'daktari wa magonjwa ya kuambukiza',
+  'daktari wa magonjwa ya kitropiki',
+  'daktari wa dharura',
+  'daktari wa wagonjwa mahututi',
+  'daktari wa ajali na dharura',
+  'daktari wa matibabu ya maumivu',
+  'daktari wa huduma za wagonjwa mahututi',
+  'daktari wa meno',
+  'daktari wa kusahihisha meno',
+  'daktari wa upasuaji wa mdomo',
+  'daktari wa picha za matibabu',
+  'daktari wa upasuaji kwa kutumia picha za matibabu',
+  'daktari wa uchunguzi wa maabara',
+  'daktari wa maabara ya kliniki',
+  'mtaalamu wa vijidudu',
+  'daktari wa usingizi wa upasuaji',
+  'daktari wa usingizi na maumivu',
+  'mtaalamu wa tiba ya viungo',
+  'mtaalamu wa kurejesha uwezo wa kufanya kazi',
+  'mtaalamu wa utafiti wa magonjwa',
+  'mtaalamu wa afya ya jamii',
+  'daktari wa magonjwa ya kurithi',
+  'daktari wa mzio',
+  'daktari wa kinga ya mwili',
+  'daktari wa wazee',
+  'daktari wa upasuaji wa kurekebisha mwili',
+  'daktari wa upasuaji wa urembo',
+  'daktari wa sumu',
+  'daktari wa afya ya usafiri wa anga',
+  'daktari wa matibabu ya oksijeni maalum',
+  'daktari wa michezo',
+  'daktari wa upasuaji wa kupunguza uzito',
+  'daktari wa upasuaji wa kupandikiza viungo',
+  'daktari wa upasuaji wa mkono',
+  'daktari wa upasuaji wa uti wa mgongo',
+  'daktari wa upasuaji wa watoto',
+  'daktari wa upasuaji wa kifua',
+  'daktari wa upasuaji wa uso na fuvu',
+  'daktari wa dawa za tiba',
+  'daktari wa tiba ya kurejesha afya',
+  'daktari wa afya kazini',
+  'daktari wa afya ya wasafiri',
+  'daktari wa kinga ya magonjwa',
+  'daktari wa mtindo wa maisha',
+  'daktari wa tiba kwa njia ya mtandao',
+  'daktari wa tiba shirikishi',
+  'mtaalamu wa moyo',
+  'mtaalamu wa watoto',
+  'mtaalamu wa akili',
+  'mtaalamu wa meno',
+  'mtaalamu wa ngozi',
+  'mtaalamu wa macho',
+  'mtaalamu wa masikio',
+  'mtaalamu wa pua',
+  'mtaalamu wa koo',
+  'mtaalamu wa mifupa',
+  'mtaalamu wa upasuaji',
+  'mtaalamu wa figo',
+  'mtaalamu wa ini',
+  'mtaalamu wa damu',
+  'mtaalamu wa kisukari',
+  'mtaalamu wa shinikizo',
+  'mtaalamu wa uzazi',
+  'mtaalamu wa majeraha',
+  'mtaalamu wa magonjwa ya ndani',
+  'mtaalamu wa moyo na mishipa',
+  'mtaalamu wa mfumo wa neva',
+  'mtaalamu wa saratani',
+];
+
+const SPECIALIZATION_KEYWORDS: Array<{ label: string; keywords: string[] }> = [
+  { label: 'General Medicine', keywords: ['general medicine', 'general practitioner', 'daktari wa kawaida'] },
+  { label: 'Family Medicine', keywords: ['family physician', 'daktari wa familia'] },
+  { label: 'Internal Medicine', keywords: ['internal medicine', 'daktari wa magonjwa ya ndani'] },
+  { label: 'Hospitalist', keywords: ['hospitalist', 'daktari wa wagonjwa waliolazwa hospitalini'] },
+  { label: 'Cardiology', keywords: ['cardiologist', 'daktari wa moyo', 'heart doctor'] },
+  { label: 'Interventional Cardiology', keywords: ['interventional cardiologist', 'daktari wa matibabu ya moyo kwa upasuaji mdogo'] },
+  { label: 'Cardiac Surgery', keywords: ['cardiac surgeon', 'daktari wa upasuaji wa moyo'] },
+  { label: 'Vascular Surgery', keywords: ['vascular surgeon', 'daktari wa mishipa ya damu'] },
+  { label: 'Hematology', keywords: ['hematologist', 'daktari wa magonjwa ya damu'] },
+  { label: 'Hematology-Oncology', keywords: ['hematology-oncologist', 'daktari wa magonjwa ya damu na saratani'] },
+  { label: 'Neurology', keywords: ['neurologist', 'daktari wa neva'] },
+  { label: 'Neurosurgery', keywords: ['neurosurgeon', 'daktari wa upasuaji wa ubongo na neva'] },
+  { label: 'Neurophysiology', keywords: ['neurophysiologist', 'mtaalamu wa mfumo wa neva'] },
+  { label: 'Stroke', keywords: ['stroke specialist', 'daktari wa kiharusi'] },
+  { label: 'Psychiatry', keywords: ['psychiatrist', 'daktari wa afya ya akili'] },
+  { label: 'Child Psychiatry', keywords: ['child psychiatrist', 'daktari wa afya ya akili ya watoto'] },
+  { label: 'Addiction Psychiatry', keywords: ['addiction psychiatrist', 'daktari wa uraibu wa dawa za kulevya'] },
+  { label: 'Orthopedics', keywords: ['orthopedic surgeon', 'daktari wa mifupa'] },
+  { label: 'Sports Medicine', keywords: ['sports medicine', 'sports physician', 'daktari wa majeraha ya michezo', 'daktari wa michezo'] },
+  { label: 'Rheumatology', keywords: ['rheumatologist', 'daktari wa magonjwa ya viungo'] },
+  { label: 'Physical Medicine', keywords: ['physical medicine', 'daktari wa tiba ya mwili'] },
+  { label: 'Pediatrics', keywords: ['pediatrician', 'daktari wa watoto'] },
+  { label: 'Neonatology', keywords: ['neonatologist', 'daktari wa watoto wachanga'] },
+  { label: 'Pediatric Cardiology', keywords: ['pediatric cardiologist', 'daktari wa moyo wa watoto'] },
+  { label: 'Pediatric Neurology', keywords: ['pediatric neurologist', 'daktari wa neva wa watoto'] },
+  { label: 'Gynecology', keywords: ['gynecologist', 'daktari wa wanawake'] },
+  { label: 'Obstetrics', keywords: ['obstetrician', 'daktari wa uzazi'] },
+  { label: 'Fertility', keywords: ['fertility specialist', 'daktari wa uzazi na uwezo wa kupata mtoto'] },
+  { label: 'Maternal-Fetal Medicine', keywords: ['maternal-fetal', 'daktari wa ujauzito hatarishi'] },
+  { label: 'Dermatology', keywords: ['dermatologist', 'daktari wa ngozi'] },
+  { label: 'Dermatologic Surgery', keywords: ['dermatologic surgeon', 'daktari wa upasuaji wa ngozi'] },
+  { label: 'Ophthalmology', keywords: ['ophthalmologist', 'daktari wa macho'] },
+  { label: 'Optometry', keywords: ['optometrist', 'mtaalamu wa macho'] },
+  { label: 'Retina', keywords: ['retinal specialist', 'daktari wa retina ya jicho'] },
+  { label: 'ENT', keywords: ['ent specialist', 'otolaryngologist', 'daktari wa masikio, pua na koo'] },
+  { label: 'Audiology', keywords: ['audiologist', 'mtaalamu wa kusikia'] },
+  { label: 'Head & Neck Surgery', keywords: ['head and neck surgeon', 'daktari wa upasuaji wa kichwa na shingo'] },
+  { label: 'Gastroenterology', keywords: ['gastroenterologist', 'daktari wa tumbo na mfumo wa chakula'] },
+  { label: 'Hepatology', keywords: ['hepatologist', 'daktari wa ini'] },
+  { label: 'Colorectal Surgery', keywords: ['colorectal surgeon', 'daktari wa utumbo mpana'] },
+  { label: 'Nephrology', keywords: ['nephrologist', 'daktari wa figo'] },
+  { label: 'Urology', keywords: ['urologist', 'daktari wa mfumo wa mkojo'] },
+  { label: 'Urologic Surgery', keywords: ['urologic surgeon', 'daktari wa upasuaji wa mfumo wa mkojo'] },
+  { label: 'Pulmonology', keywords: ['pulmonologist', 'daktari wa mapafu'] },
+  { label: 'Respiratory', keywords: ['respiratory specialist', 'mtaalamu wa kupumua'] },
+  { label: 'Sleep Medicine', keywords: ['sleep medicine', 'daktari wa matatizo ya usingizi'] },
+  { label: 'Medical Oncology', keywords: ['medical oncologist', 'daktari wa saratani'] },
+  { label: 'Radiation Oncology', keywords: ['radiation oncologist', 'daktari wa tiba ya mionzi kwa saratani'] },
+  { label: 'Surgical Oncology', keywords: ['surgical oncologist', 'daktari wa upasuaji wa saratani'] },
+  { label: 'General Surgery', keywords: ['general surgeon', 'daktari wa upasuaji wa kawaida'] },
+  { label: 'Trauma Surgery', keywords: ['trauma surgeon', 'daktari wa majeraha makubwa'] },
+  { label: 'Laparoscopic Surgery', keywords: ['laparoscopic surgeon', 'daktari wa upasuaji mdogo wa matundu'] },
+  { label: 'Endocrinology', keywords: ['endocrinologist', 'daktari wa homoni'] },
+  { label: 'Diabetology', keywords: ['diabetologist', 'daktari wa kisukari'] },
+  { label: 'Infectious Diseases', keywords: ['infectious disease', 'daktari wa magonjwa ya kuambukiza'] },
+  { label: 'Tropical Diseases', keywords: ['tropical disease', 'daktari wa magonjwa ya kitropiki'] },
+  { label: 'Emergency Medicine', keywords: ['emergency medicine', 'daktari wa dharura'] },
+  { label: 'Intensive Care', keywords: ['intensive care', 'daktari wa wagonjwa mahututi'] },
+  { label: 'Trauma Emergency', keywords: ['trauma emergency', 'daktari wa ajali na dharura'] },
+  { label: 'Pain Management', keywords: ['pain management', 'daktari wa matibabu ya maumivu'] },
+  { label: 'Palliative Care', keywords: ['palliative care', 'daktari wa huduma za wagonjwa mahututi'] },
+  { label: 'Dentistry', keywords: ['dentist', 'daktari wa meno'] },
+  { label: 'Orthodontics', keywords: ['orthodontist', 'daktari wa kusahihisha meno'] },
+  { label: 'Oral Surgery', keywords: ['oral surgeon', 'daktari wa upasuaji wa mdomo'] },
+  { label: 'Radiology', keywords: ['radiologist', 'daktari wa picha za matibabu'] },
+  { label: 'Interventional Radiology', keywords: ['interventional radiologist', 'daktari wa upasuaji kwa kutumia picha za matibabu'] },
+  { label: 'Pathology', keywords: ['pathologist', 'daktari wa uchunguzi wa maabara'] },
+  { label: 'Clinical Pathology', keywords: ['clinical pathologist', 'daktari wa maabara ya kliniki'] },
+  { label: 'Microbiology', keywords: ['microbiologist', 'mtaalamu wa vijidudu'] },
+  { label: 'Anesthesiology', keywords: ['anesthesiologist', 'daktari wa usingizi wa upasuaji'] },
+  { label: 'Pain Anesthesiology', keywords: ['pain anesthesiologist', 'daktari wa usingizi na maumivu'] },
+  { label: 'Physiotherapy', keywords: ['physiotherapist', 'mtaalamu wa tiba ya viungo'] },
+  { label: 'Occupational Therapy', keywords: ['occupational therapist', 'mtaalamu wa kurejesha uwezo wa kufanya kazi'] },
+  { label: 'Epidemiology', keywords: ['epidemiologist', 'mtaalamu wa utafiti wa magonjwa'] },
+  { label: 'Public Health', keywords: ['public health', 'mtaalamu wa afya ya jamii'] },
+  { label: 'Genetics', keywords: ['geneticist', 'daktari wa magonjwa ya kurithi'] },
+  { label: 'Allergy', keywords: ['allergist', 'daktari wa mzio'] },
+  { label: 'Immunology', keywords: ['immunologist', 'daktari wa kinga ya mwili'] },
+  { label: 'Geriatrics', keywords: ['geriatrician', 'daktari wa wazee'] },
+  { label: 'Plastic Surgery', keywords: ['plastic surgeon', 'daktari wa upasuaji wa kurekebisha mwili'] },
+  { label: 'Cosmetic Surgery', keywords: ['cosmetic surgeon', 'daktari wa upasuaji wa urembo'] },
+  { label: 'Toxicology', keywords: ['toxicologist', 'daktari wa sumu'] },
+  { label: 'Aviation Medicine', keywords: ['aviation medicine', 'daktari wa afya ya usafiri wa anga'] },
+  { label: 'Hyperbaric Medicine', keywords: ['hyperbaric medicine', 'daktari wa matibabu ya oksijeni maalum'] },
+  { label: 'Bariatric Surgery', keywords: ['bariatric surgeon', 'daktari wa upasuaji wa kupunguza uzito'] },
+  { label: 'Transplant Surgery', keywords: ['transplant surgeon', 'daktari wa upasuaji wa kupandikiza viungo'] },
+  { label: 'Hand Surgery', keywords: ['hand surgeon', 'daktari wa upasuaji wa mkono'] },
+  { label: 'Spine Surgery', keywords: ['spine surgeon', 'daktari wa upasuaji wa uti wa mgongo'] },
+  { label: 'Pediatric Surgery', keywords: ['pediatric surgeon', 'daktari wa upasuaji wa watoto'] },
+  { label: 'Thoracic Surgery', keywords: ['thoracic surgeon', 'daktari wa upasuaji wa kifua'] },
+  { label: 'Craniofacial Surgery', keywords: ['craniofacial surgeon', 'daktari wa upasuaji wa uso na fuvu'] },
+  { label: 'Clinical Pharmacology', keywords: ['clinical pharmacologist', 'daktari wa dawa za tiba'] },
+  { label: 'Rehabilitation Medicine', keywords: ['rehabilitation physician', 'daktari wa tiba ya kurejesha afya'] },
+  { label: 'Occupational Health', keywords: ['occupational health', 'daktari wa afya kazini'] },
+  { label: 'Travel Medicine', keywords: ['travel medicine', 'daktari wa afya ya wasafiri'] },
+  { label: 'Preventive Medicine', keywords: ['preventive medicine', 'daktari wa kinga ya magonjwa'] },
+  { label: 'Lifestyle Medicine', keywords: ['lifestyle medicine', 'daktari wa mtindo wa maisha'] },
+  { label: 'Telemedicine', keywords: ['telemedicine', 'daktari wa tiba kwa njia ya mtandao'] },
+  { label: 'Integrative Medicine', keywords: ['integrative medicine', 'daktari wa tiba shirikishi'] },
+];
+
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
@@ -41,6 +378,7 @@ export class AiService {
   private readonly ollamaTimeoutMs: number;
   private readonly ollamaNumCtx: number;
   private readonly ollamaMaxOutputTokens: number;
+  private readonly ollamaSkipRerank: boolean;
   private cachedOllamaModel: string | null = null;
   private aiCooldownUntil = 0;
   private aiCooldownReason: string | null = null;
@@ -88,6 +426,8 @@ export class AiService {
       Number(process.env.OLLAMA_MAX_OUTPUT_TOKENS || 220) || 220,
       64,
     );
+    this.ollamaSkipRerank =
+      String(process.env.OLLAMA_SKIP_RERANK || 'true').trim().toLowerCase() === 'true';
   }
 
   private get isAiCoolingDown() {
@@ -700,6 +1040,120 @@ export class AiService {
     }
   }
 
+  private assistantHistoryLimit = 12;
+
+  private getConversationKey(userId: string, conversationId?: string) {
+    const key = String(conversationId || 'default').trim() || 'default';
+    return { userId, conversationId: key };
+  }
+
+  private getConversationRecord(userId: string, conversationId?: string) {
+    const key = this.getConversationKey(userId, conversationId);
+    const existing = (InMemoryStore.list('aiConversations') as any[]).find(
+      (item) => item.userId === key.userId && item.conversationId === key.conversationId,
+    );
+    if (existing) return existing;
+    return InMemoryStore.create('aiConversations', {
+      userId: key.userId,
+      conversationId: key.conversationId,
+      messages: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  private appendConversationMessages(conversation: any, messages: Array<{ role: string; content: string }>) {
+    const now = new Date().toISOString();
+    const normalized = messages
+      .map((message) => ({
+        role: String(message.role || '').trim() || 'assistant',
+        content: String(message.content || '').trim(),
+        createdAt: now,
+      }))
+      .filter((message) => message.content);
+    if (!normalized.length) return conversation;
+    const merged = [...(conversation.messages || []), ...normalized];
+    conversation.messages = merged.slice(-this.assistantHistoryLimit);
+    conversation.updatedAt = now;
+    return conversation;
+  }
+
+  private formatConversationHistory(messages: any[]) {
+    if (!Array.isArray(messages) || !messages.length) return '';
+    return messages
+      .map((message) => {
+        const role = String(message?.role || 'assistant').toLowerCase();
+        const label = role === 'user' ? 'User' : role === 'assistant' ? 'Assistant' : 'System';
+        return `${label}: ${String(message?.content || '').trim()}`;
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  private buildAssistantSystemPrompt(role: string) {
+    return [
+      'You are Medilink AI, a helpful, calm, and concise assistant for the Medilink healthcare app.',
+      'Tone: professional, warm, and direct. Ask one clarifying question when necessary.',
+      'You can take actions using tools when the user asks to find a medic, pharmacy, hospital, user, or to book appointments.',
+      'If medical advice is requested, provide general guidance only and recommend contacting a qualified professional.',
+      'Do not invent user data. Use tool results or say what data is needed.',
+      `User role: ${role}`,
+    ].join(' ');
+  }
+
+  private async runAssistantTools(toolCalls: any[], user: any) {
+    const results: any[] = [];
+    const actions: any[] = [];
+    for (const call of toolCalls || []) {
+      const name = String(call?.name || '').trim();
+      const args = call?.args || {};
+      if (!name) continue;
+      if (name === 'search') {
+        const query = String(args?.query || '').trim();
+        const include = Array.isArray(args?.include) ? args.include : undefined;
+        const limit = Number(args?.limit || 10) || 10;
+        const result = await this.smartSearch({ query, include, limit }, user);
+        results.push({ tool: name, result });
+        actions.push({ type: 'SHOW_RESULTS', target: 'search', count: result?.results?.length || 0 });
+        continue;
+      }
+      if (name === 'lookup_user') {
+        const userId = String(args?.userId || '').trim();
+        const email = String(args?.email || '').trim().toLowerCase();
+        const nameQuery = String(args?.name || '').trim();
+        const where: any = {};
+        if (userId) where.id = userId;
+        if (email) where.email = email;
+        if (!userId && !email && nameQuery) {
+          where.fullName = { contains: nameQuery, mode: 'insensitive' };
+        }
+        const users = await this.prisma.user.findMany({
+          where,
+          select: { id: true, fullName: true, email: true, role: true, createdAt: true },
+          take: 5,
+        });
+        results.push({ tool: name, result: users });
+        actions.push({ type: 'SHOW_RESULTS', target: 'user_lookup', count: users.length });
+        continue;
+      }
+      if (name === 'book_appointment') {
+        const query = String(args?.query || '').trim();
+        const preferredDate = String(args?.preferredDate || '').trim();
+        const limit = Number(args?.limit || 5) || 5;
+        const result = await this.appointmentCopilot(
+          { query, preferredDate, limit, include: ['medic', 'hospital'] },
+          user,
+        );
+        results.push({ tool: name, result });
+        actions.push({ type: 'SHOW_RESULTS', target: 'appointment', count: result?.recommendations?.length || 0 });
+        actions.push({ type: 'OPEN_SCREEN', target: '/(app)/(patient)/book-appointment' });
+        continue;
+      }
+      results.push({ tool: name, error: 'Unknown tool' });
+    }
+    return { results, actions };
+  }
+
   private async getAiAccessState(user: any): Promise<AiAccessState> {
     const userId = String(user?.userId || '');
     if (!userId) {
@@ -1066,25 +1520,133 @@ export class AiService {
     const maxPriceMatch =
       text.match(/(?:under|below|less than|<=?)\s*(?:kes|ksh|kshs)?\s*([0-9]+(?:\.[0-9]+)?)/i) ||
       text.match(/(?:kes|ksh|kshs)\s*([0-9]+(?:\.[0-9]+)?)/i);
-    const inLocationMatch = text.match(/\bin\s+([a-z\s]{2,40})/i);
-    const locationTerms = inLocationMatch
-      ? String(inLocationMatch[1] || '')
-          .trim()
-          .split(/\s+/)
-          .filter((part) => part.length > 2)
-      : [];
+    const locationTermsSet = new Set<string>();
+    const locationRegex = /\b(?:in|from|near|around|within|at|katika|kwenye|kutoka|karibu na|eneo la|jirani na)\s+([a-z\s]{2,40})/gi;
+    let match = locationRegex.exec(text);
+    while (match) {
+      const phrase = String(match[1] || '')
+        .trim()
+        .replace(/[^a-z\s]/g, ' ');
+      phrase
+        .split(/\s+/)
+        .map((part) => part.trim())
+        .filter((part) => part.length > 2)
+        .forEach((part) => locationTermsSet.add(part));
+      match = locationRegex.exec(text);
+    }
 
-    const includeTypes: Array<'patient' | 'medic' | 'hospital' | 'pharmacy'> = [];
-    if (/(medic|doctor|nurse|specialist|consultant|clinic)/.test(text)) includeTypes.push('medic');
-    if (/(hospital|facility|ward|admission)/.test(text)) includeTypes.push('hospital');
-    if (/(pharmacy|medicine|drug|medication|product)/.test(text)) includeTypes.push('pharmacy');
+    const commonLocations = [
+      'nairobi',
+      'mombasa',
+      'kisumu',
+      'nakuru',
+      'eldoret',
+      'thika',
+      'naivasha',
+      'nanyuki',
+      'malindi',
+      'ukunda',
+      'ruiru',
+      'kikuyu',
+      'kitale',
+      'kakamega',
+      'kericho',
+      'nyahururu',
+      'migori',
+      'garissa',
+      'isiolo',
+      'marsabit',
+      'lamu',
+      'kilifi',
+      'kwale',
+      'narok',
+      'embu',
+      'meru',
+      'nyeri',
+      'muranga',
+      'kirinyaga',
+      'nyandarua',
+      'laikipia',
+      'kajiado',
+      'machakos',
+      'makueni',
+      'kitui',
+      'bungoma',
+      'busia',
+      'siaya',
+      'homabay',
+      'homa',
+      'homa bay',
+      'kisii',
+      'nyamira',
+      'taita',
+      'taveta',
+      'taita taveta',
+      'tana river',
+      'tharaka',
+      'tharaka nithi',
+      'trans nzoia',
+      'uasin gishu',
+      'nandi',
+      'bomet',
+      'baringo',
+      'elgeyo',
+      'marakwet',
+      'elgeyo marakwet',
+      'samburu',
+      'turkana',
+      'west pokot',
+      'wajir',
+      'mandera',
+    ];
+    commonLocations.forEach((loc) => {
+      if (text.includes(loc)) locationTermsSet.add(loc);
+    });
+
+    const locationTerms = Array.from(locationTermsSet);
+
+    const includeTypes: Array<'patient' | 'medic' | 'hospital' | 'pharmacy' | 'product'> = [];
+    if (MEDIC_QUERY_TERMS.some((term) => text.includes(term))) includeTypes.push('medic');
+    if (/(hospital|facility|ward|admission|hospitali|kituo cha afya|kituo)/.test(text))
+      includeTypes.push('hospital');
+    if (/(pharmacy|famasia|duka la dawa)/.test(text)) includeTypes.push('pharmacy');
+    if (
+      /(medicine|drug|medication|product|tablet|capsule|syrup|dawa|dawa za|dawa ya)/.test(text)
+    ) {
+      includeTypes.push('product');
+      includeTypes.push('pharmacy');
+    }
+
+    const specializationTerms = SPECIALIZATION_KEYWORDS
+      .filter((entry) => entry.keywords.some((keyword) => text.includes(keyword)))
+      .map((entry) => entry.label);
+    if (specializationTerms.length) includeTypes.push('medic');
 
     return {
       minExperience: minExperienceMatch ? Number(minExperienceMatch[1]) : 0,
       maxPrice: maxPriceMatch ? Number(maxPriceMatch[1]) : 0,
       locationTerms,
+      specializationTerms,
       includeTypes: Array.from(new Set(includeTypes)),
     };
+  }
+
+  private looksLikeSearchQuery(query: string, hints?: ReturnType<AiService['extractSearchHints']>) {
+    const text = String(query || '').toLowerCase();
+    if (!text) return false;
+    if (/(find|search|look\s*for|locate|nearby|closest|around|near|within)/.test(text)) {
+      return true;
+    }
+    if (MEDIC_QUERY_TERMS.some((term) => text.includes(term))) return true;
+    if (/(hospital|pharmacy|famasia|duka la dawa|medicine|medication|drug|dawa)/.test(text)) {
+      return true;
+    }
+    if (hints) {
+      if (hints.includeTypes?.length) return true;
+      if (hints.locationTerms?.length) return true;
+      if (hints.specializationTerms?.length) return true;
+    }
+    return false;
   }
 
   async smartSearch(payload: any, user: any) {
@@ -1094,9 +1656,15 @@ export class AiService {
     const limit = Math.min(Math.max(Number(payload?.limit || 12), 1), 25);
     const include = Array.isArray(payload?.include) ? payload.include : null;
     const hints = this.extractSearchHints(query);
+    const allowedTypes = new Set(['patient', 'medic', 'hospital', 'pharmacy', 'product']);
+    const normalizedInclude = include?.length
+      ? include
+          .map((item) => String(item || '').trim().toLowerCase())
+          .filter((item) => allowedTypes.has(item))
+      : null;
     const resolvedInclude =
-      include && include.length
-        ? include
+      normalizedInclude && normalizedInclude.length
+        ? normalizedInclude
         : hints.includeTypes.length
           ? hints.includeTypes
           : null;
@@ -1104,6 +1672,11 @@ export class AiService {
     if (!query) {
       return { query, results: [] as SearchResult[], notes: 'Query is required.' };
     }
+
+    const includeProducts =
+      resolvedInclude?.length
+        ? resolvedInclude.includes('product')
+        : hints.includeTypes.includes('product');
 
     const users = await this.prisma.user.findMany({
       select: {
@@ -1127,7 +1700,41 @@ export class AiService {
       take: 600,
     });
     const medicByUserId = new Map(medicProfiles.map((m) => [m.userId, m]));
-    const extrasMap = await getProfileExtrasMap(this.prisma, users.map((u) => u.id));
+    const userIds = users.map((u) => u.id);
+    const [extrasMap, tenantLinks] = await Promise.all([
+      getProfileExtrasMap(this.prisma, userIds),
+      this.prisma.tenantUser.findMany({
+        where: {
+          userId: { in: userIds },
+          tenant: { type: 'HOSPITAL' },
+        },
+        select: { userId: true, tenantId: true, isPrimary: true },
+      }),
+    ]);
+    const tenantByUser = new Map<string, string>();
+    tenantLinks.forEach((link) => {
+      if (!link.userId || !link.tenantId) return;
+      const current = tenantByUser.get(link.userId);
+      if (!current || link.isPrimary) {
+        tenantByUser.set(link.userId, link.tenantId);
+      }
+    });
+    const tenantIds = Array.from(new Set(tenantLinks.map((link) => link.tenantId).filter(Boolean)));
+    const db = this.prisma as any;
+    const hospitalServiceRows = tenantIds.length
+      ? await db.hospitalService.findMany({
+          where: { tenantId: { in: tenantIds } },
+          select: { tenantId: true, name: true },
+        })
+      : [];
+    const servicesByTenant = new Map<string, string[]>();
+    hospitalServiceRows.forEach((row) => {
+      const key = String(row.tenantId || '');
+      if (!key) return;
+      const list = servicesByTenant.get(key) || [];
+      if (row.name) list.push(String(row.name));
+      servicesByTenant.set(key, list);
+    });
 
     const userCandidates: SearchResult[] = users
       .map((u) => {
@@ -1145,6 +1752,28 @@ export class AiService {
         if (resolvedInclude?.length && !resolvedInclude.includes(type)) return null;
         const medic = medicByUserId.get(u.id);
         const extras = (extrasMap.get(u.id) || {}) as any;
+        const tenantId = tenantByUser.get(u.id) || '';
+        const hospitalServices = tenantId ? servicesByTenant.get(tenantId) || [] : [];
+        const resolvedServices =
+          type === 'hospital'
+            ? hospitalServices.length
+              ? hospitalServices
+              : extras.services || extras.specialties || ''
+            : extras.services || extras.specialties || '';
+
+        const locationExtras = [
+          extras.locationTown,
+          extras.county,
+          extras.townCity,
+          extras.locationAddress,
+          extras.address,
+          extras.location?.city,
+          extras.location?.area,
+          extras.location?.address,
+          extras.location?.county,
+        ]
+          .filter(Boolean)
+          .join(' ');
 
         const searchable = [
           u.fullName || '',
@@ -1157,17 +1786,22 @@ export class AiService {
           extras.facilityType || '',
           extras.pharmacyType || '',
           extras.specialization || '',
-          extras.services || '',
-          extras.specialties || '',
-          extras.locationTown || '',
-          extras.county || '',
-          extras.townCity || '',
+          extras.bio || '',
+          extras.professionalType || '',
+          extras.licenseNumber || '',
+          extras.phone || '',
+          extras.languages || '',
+          extras.gender || '',
+          extras.hospitalServices || '',
+          extras.serviceTags || '',
+          resolvedServices || '',
+          locationExtras,
           extras.hourlyRate || '',
           extras.consultationFee || '',
         ].join(' ');
 
         let score = this.scoreCandidate(query, searchable);
-        const locationHaystack = `${extras.locationTown || ''} ${extras.county || ''} ${extras.townCity || ''}`.toLowerCase();
+        const locationHaystack = locationExtras.toLowerCase();
         if (hints.locationTerms.length) {
           const hasLocationHit = hints.locationTerms.some((term) =>
             locationHaystack.includes(String(term).toLowerCase()),
@@ -1177,6 +1811,15 @@ export class AiService {
         if (type === 'medic' && hints.minExperience > 0) {
           const exp = Number(medic?.experienceYears || 0);
           score += exp >= hints.minExperience ? 14 : -10;
+        }
+        if (type === 'medic' && hints.specializationTerms?.length) {
+          const specialization = String(
+            medic?.specialization || extras.specialization || extras.professionalType || '',
+          ).toLowerCase();
+          const hasSpecialty = hints.specializationTerms.some((term: string) =>
+            specialization.includes(String(term).toLowerCase()),
+          );
+          score += hasSpecialty ? 18 : -6;
         }
         const fee = this.extractCurrencyNumber(
           extras.hourlyRate || extras.consultationFee || medic?.consultationFee || '',
@@ -1188,9 +1831,15 @@ export class AiService {
 
         const subtitleBits =
           type === 'medic'
-            ? [medic?.specialization, `${medic?.experienceYears ?? 0} yrs`, extras?.hourlyRate && `KES ${extras.hourlyRate}/hr`, u.email]
+            ? [
+                medic?.specialization,
+                `${medic?.experienceYears ?? 0} yrs`,
+                extras?.hourlyRate && `KES ${extras.hourlyRate}/hr`,
+                extras?.licenseNumber || medic?.licenseNumber,
+                u.email,
+              ]
             : type === 'hospital'
-              ? [extras.hospitalName, extras.county, extras.services || extras.specialties, u.email]
+              ? [extras.hospitalName, extras.county, resolvedServices, u.email]
               : type === 'pharmacy'
                 ? [extras.pharmacyName, extras.county || extras.townCity, u.email]
                 : [u.email];
@@ -1205,12 +1854,118 @@ export class AiService {
       })
       .filter(Boolean) as SearchResult[];
 
-    const candidates = [...userCandidates]
+    const productCandidates: SearchResult[] = includeProducts
+      ? (
+          await this.prisma.product.findMany({
+            select: {
+              id: true,
+              name: true,
+              productName: true,
+              description: true,
+              category: true,
+              manufacturer: true,
+              sku: true,
+              barcode: true,
+              price: true,
+              stock: true,
+              numberInStock: true,
+              quantity: true,
+              prescriptionRequired: true,
+              requiresPrescription: true,
+              pharmacyId: true,
+              pharmacy: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                  phone: true,
+                  location: true,
+                },
+              },
+            },
+            take: 600,
+            orderBy: { createdAt: 'desc' },
+          })
+        )
+          .map((product) => {
+            const pharmacy = product.pharmacy || ({} as any);
+            const price = Number(product.price || 0);
+            const stock = Number(
+              product.stock ?? product.numberInStock ?? product.quantity ?? 0,
+            );
+            const locationText = (() => {
+              const raw = pharmacy?.location;
+              if (!raw) return '';
+              if (typeof raw === 'string') return raw;
+              if (Array.isArray(raw)) return raw.filter(Boolean).join(' ');
+              if (typeof raw === 'object') return Object.values(raw).filter(Boolean).join(' ');
+              return '';
+            })();
+
+            const searchable = [
+              product.name || '',
+              product.productName || '',
+              product.description || '',
+              product.category || '',
+              product.manufacturer || '',
+              product.sku || '',
+              product.barcode || '',
+              pharmacy?.name || '',
+              pharmacy?.email || '',
+              pharmacy?.phone || '',
+              locationText,
+            ].join(' ');
+
+            let score = this.scoreCandidate(query, searchable);
+            if (hints.locationTerms.length) {
+              const loc = locationText.toLowerCase();
+              const hasLocationHit = hints.locationTerms.some((term) =>
+                loc.includes(String(term).toLowerCase()),
+              );
+              score += hasLocationHit ? 10 : -3;
+            }
+            if (hints.maxPrice > 0 && price > 0) {
+              score += price <= hints.maxPrice ? 8 : -10;
+            }
+            if (score <= 0) return null;
+
+            const subtitleBits = [
+              price ? `KES ${price.toLocaleString()}` : '',
+              stock ? `Stock: ${stock}` : '',
+              pharmacy?.name || '',
+              locationText,
+              product.prescriptionRequired || product.requiresPrescription
+                ? 'Prescription required'
+                : '',
+            ];
+
+            return {
+              id: product.id,
+              type: 'product',
+              name: product.name || product.productName || 'Product',
+              subtitle: subtitleBits.filter(Boolean).join(' | '),
+              score,
+            } as SearchResult;
+          })
+          .filter((item): item is SearchResult => Boolean(item))
+      : [];
+
+    const candidates = [...userCandidates, ...productCandidates]
       .sort((a, b) => b.score - a.score)
       .slice(0, 80);
 
     if (!candidates.length) {
       return { query, results: [], notes: 'No matching records.' };
+    }
+
+    if (this.provider === 'ollama' && this.ollamaSkipRerank) {
+      return {
+        query,
+        results: candidates.slice(0, limit),
+        notes: 'Fast search applied.',
+        hints,
+        generatedAt: new Date().toISOString(),
+      };
     }
 
     const reranked = await this.askJson<{ results: SearchResult[]; notes?: string }>(
@@ -1220,6 +1975,7 @@ export class AiService {
         'Use filters implied in query: specialization, years, location, price.',
         'Prioritize exact specialization and geographic matches.',
         'Do not fabricate IDs. Use provided IDs only.',
+        'Types can include patient, medic, hospital, pharmacy, product.',
       ].join(' '),
       [
         `Query: ${query}`,
@@ -1262,7 +2018,7 @@ export class AiService {
 
     const operations = {
       shifts: InMemoryStore.list('shifts').length,
-      appointments: InMemoryStore.list('appointments').length,
+      appointments: await this.prisma.appointment.count(),
       complaints: InMemoryStore.list('complaints').length,
       notifications: InMemoryStore.list('notifications').length,
       hires: InMemoryStore.list('medicHires').length,
@@ -1608,7 +2364,18 @@ export class AiService {
     const candidateSlots = this.parseMedicationList(payload?.preferredSlots).length
       ? this.parseMedicationList(payload?.preferredSlots)
       : defaultSlots;
-    const bookedAppointments = InMemoryStore.list('appointments') as any[];
+    const bookedAppointments = await this.prisma.appointment.findMany({
+      where: {
+        date: dateIso,
+        status: { notIn: ['cancelled', 'rejected'] },
+      },
+      select: {
+        medicId: true,
+        date: true,
+        time: true,
+        status: true,
+      },
+    });
 
     const top = (Array.isArray(search?.results) ? search.results : []).slice(0, 10);
     const recommendations = top.map((item: any) => {
@@ -3147,6 +3914,115 @@ export class AiService {
         module: item.module,
         score: item.score,
       })),
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  async assistantChat(payload: any, user: any) {
+    await this.ensureAiAccess(user);
+
+    const query = String(payload?.query || '').trim();
+    if (!query) {
+      return { answer: 'Please type a message.' };
+    }
+
+    const userId = String(user?.userId || '');
+    const role = String(user?.role || '').trim();
+    const conversationId = String(payload?.conversationId || 'default').trim() || 'default';
+    const conversation = this.getConversationRecord(userId, conversationId);
+    const historyText = this.formatConversationHistory(conversation?.messages || []);
+
+    const hints = this.extractSearchHints(query);
+    const looksLikeSearch = this.looksLikeSearchQuery(query, hints);
+    if (looksLikeSearch) {
+      const include =
+        hints.includeTypes && hints.includeTypes.length
+          ? hints.includeTypes
+          : undefined;
+      const limit = Math.min(Math.max(Number(payload?.limit || 12), 1), 25);
+      const result = await this.smartSearch({ query, include, limit }, user);
+      const items = Array.isArray(result?.results) ? result.results : [];
+      const summaryLines = items.slice(0, 5).map((item: any, index: number) => {
+        const name = item?.name || item?.fullName || 'Result';
+        const subtitle = item?.subtitle ? ` — ${item.subtitle}` : '';
+        return `${index + 1}. ${name}${subtitle}`;
+      });
+      const answer = items.length
+        ? [
+            `I found ${items.length} result(s).`,
+            ...summaryLines,
+            'Would you like me to open one or refine the search?',
+          ].join('\n')
+        : 'I could not find any matches. Try adding a nearby location or specialization.';
+
+      this.appendConversationMessages(conversation, [
+        { role: 'user', content: query },
+        { role: 'assistant', content: answer },
+      ]);
+
+      return {
+        answer,
+        conversationId,
+        actions: [{ type: 'SHOW_RESULTS', target: 'search', count: items.length }],
+        toolResults: [{ tool: 'search', result }],
+        generatedAt: new Date().toISOString(),
+      };
+    }
+
+    const system = this.buildAssistantSystemPrompt(role);
+
+    const toolPlannerPrompt = [
+      historyText ? `Conversation so far:\n${historyText}` : '',
+      `User message: ${query}`,
+      'Decide whether to call any tools.',
+      'Available tools:',
+      '- search: find medics, hospitals, pharmacies, and products. args: { query, include?: ["medic","hospital","pharmacy"], limit?: number }',
+      '- lookup_user: find a specific user. args: { userId?, email?, name? }',
+      '- book_appointment: suggest booking slots. args: { query, preferredDate?, limit? }',
+      'Return JSON: {"toolCalls":[{"name":"tool","args":{}}], "responseHint":"short hint"}',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const toolPlan = await this.askJson(
+      system,
+      toolPlannerPrompt,
+      { toolCalls: [], responseHint: '' },
+    );
+
+    const toolCalls = Array.isArray(toolPlan?.toolCalls) ? toolPlan.toolCalls : [];
+    const toolRun = toolCalls.length ? await this.runAssistantTools(toolCalls, user) : { results: [], actions: [] };
+
+    const toolResultsText = toolRun?.results?.length
+      ? `Tool results JSON: ${JSON.stringify(toolRun.results)}`
+      : 'Tool results JSON: []';
+
+    const finalPrompt = [
+      historyText ? `Conversation so far:\n${historyText}` : '',
+      `User message: ${query}`,
+      toolResultsText,
+      toolPlan?.responseHint ? `Response hint: ${String(toolPlan.responseHint).trim()}` : '',
+      'Respond conversationally. If tools returned results, summarize them and suggest next steps.',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const answer = await this.askText(
+      system,
+      finalPrompt,
+      'I could not generate a response.',
+    );
+
+    this.appendConversationMessages(conversation, [
+      { role: 'user', content: query },
+      { role: 'assistant', content: answer },
+    ]);
+
+    return {
+      answer,
+      conversationId,
+      actions: toolRun.actions || [],
+      toolResults: toolRun.results || [],
       generatedAt: new Date().toISOString(),
     };
   }

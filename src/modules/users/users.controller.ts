@@ -17,6 +17,8 @@ import { InMemoryStore } from 'src/common/in-memory.store';
 import { getProfileExtras, getProfileExtrasMap, mergeProfileExtras } from 'src/common/profile-extras';
 import { randomUUID } from 'crypto';
 import * as bcrypt from 'bcrypt';
+import { NotificationsGateway } from '../notifications/notifications.gateway';
+import { Prisma, UserRole } from '@prisma/client';
 import {
   ALLOWED_PASSWORD_INTERVAL_DAYS,
   computePasswordExpiryDate,
@@ -28,7 +30,7 @@ import {
 @Controller('users')
 @UseGuards(AuthGuard('jwt'))
 export class UsersController {
-  constructor(private prisma: PrismaService) {}
+  constructor(private prisma: PrismaService, private notificationsGateway: NotificationsGateway) {}
 
   private normalizeRole(role: unknown) {
     return String(role || '').trim().toUpperCase();
@@ -54,6 +56,18 @@ export class UsersController {
   private toFiniteOrNull(value: unknown) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  private hasMedicalRecordGrant(extras: any, medicId?: string | null) {
+    if (!medicId) return false;
+    const grants = Array.isArray(extras?.medicalRecordAccessGrants)
+      ? extras.medicalRecordAccessGrants
+      : [];
+    return grants.some(
+      (grant: any) =>
+        String(grant?.medicId || '') === String(medicId) &&
+        grant?.active !== false,
+    );
   }
 
   private normalizeGeoLocation(rawLocation: unknown, fallbackAddress?: string | null) {
@@ -101,6 +115,81 @@ export class UsersController {
     return includeRoles.size
       ? Array.from(includeRoles)
       : ['MEDIC', 'PHARMACY_ADMIN', 'HOSPITAL_ADMIN'];
+  }
+
+  @Get('online')
+  async onlineUsers(
+    @Req() req: any,
+    @Query('roles') roles?: string,
+    @Query('search') search?: string,
+  ) {
+    const onlineIds = this.notificationsGateway.listOnlineUserIds();
+    if (!onlineIds.length) {
+      return [];
+    }
+
+    const roleFilter = String(roles || '')
+      .split(',')
+      .map((role) => role.trim().toUpperCase())
+      .filter(Boolean)
+      .filter((role): role is UserRole =>
+        Object.values(UserRole).includes(role as UserRole),
+      );
+
+    const users = await this.prisma.user.findMany({
+      where: {
+        id: { in: onlineIds },
+        ...(roleFilter.length ? { role: { in: roleFilter } } : {}),
+      },
+      select: {
+        id: true,
+        fullName: true,
+        email: true,
+        phone: true,
+        role: true,
+        lastLogin: true,
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+
+    const extrasMap = await getProfileExtrasMap(this.prisma, users.map((user) => user.id));
+    const query = String(search || '').trim().toLowerCase();
+    const normalized = users
+      .map((user) => {
+        const extras = extrasMap.get(user.id) || {};
+        const presence = this.notificationsGateway.getPresenceMeta(user.id);
+        const firstName = String(extras.firstName || user.fullName?.split(' ')[0] || '').trim();
+        const lastName = String(extras.lastName || user.fullName?.split(' ').slice(1).join(' ') || '').trim();
+        const location =
+          extras.location?.address ||
+          extras.locationAddress ||
+          extras.address ||
+          extras.city ||
+          '';
+        return {
+          id: user.id,
+          fullName: user.fullName || `${firstName} ${lastName}`.trim(),
+          firstName,
+          lastName,
+          role: user.role,
+          email: user.email,
+          phone: user.phone,
+          location,
+          isOnline: true,
+          avatarUrl: extras.profilePhoto || extras.avatarUrl || null,
+          onlineSince: presence?.onlineSince || null,
+          lastSeenAt: presence?.lastSeenAt || user.lastLogin || null,
+        };
+      })
+      .filter((item) => {
+        if (!query) return true;
+        const haystack = `${item.fullName} ${item.firstName} ${item.lastName} ${item.email || ''} ${item.role || ''} ${item.location || ''}`.toLowerCase();
+        return haystack.includes(query);
+      });
+
+    return normalized;
   }
 
   private evaluateVitalsAlert(vital: Record<string, any>) {
@@ -209,18 +298,34 @@ export class UsersController {
     if (role === 'PATIENT') {
       return actorId;
     }
-    if (role === 'SUPER_ADMIN') {
-      if (!scopedPatientId) return actorId;
-      const patient = await this.prisma.user.findUnique({
-        where: { id: scopedPatientId },
-        select: { id: true, role: true },
-      });
-      if (!patient || this.normalizeRole(patient.role) !== 'PATIENT') {
-        throw new BadRequestException('Invalid patient scope.');
+    if (!scopedPatientId) {
+      if (role === 'SUPER_ADMIN') return actorId;
+      throw new BadRequestException('patientId is required.');
+    }
+
+    const patient = await this.prisma.user.findUnique({
+      where: { id: scopedPatientId },
+      select: { id: true, role: true },
+    });
+    if (!patient || this.normalizeRole(patient.role) !== 'PATIENT') {
+      throw new BadRequestException('Invalid patient scope.');
+    }
+
+    if (role === 'SUPER_ADMIN' || role === 'HOSPITAL_ADMIN' || role === 'PHARMACY_ADMIN') {
+      return patient.id;
+    }
+
+    if (role === 'MEDIC') {
+      const extras = await getProfileExtras(this.prisma, patient.id);
+      if (!this.hasMedicalRecordGrant(extras, actorId)) {
+        throw new ForbiddenException(
+          'Patient consent is required before viewing or updating health records.',
+        );
       }
       return patient.id;
     }
-    throw new ForbiddenException('Only patients can access patient dashboard data.');
+
+    throw new ForbiddenException('Not allowed to access patient dashboard data.');
   }
 
   private computePreventiveReminders(user: any, extras: Record<string, any>, appointments: any[]) {
@@ -409,6 +514,101 @@ export class UsersController {
     return selected;
   }
 
+  @Get('patients-directory')
+  async listPatientsDirectory(@Req() req: any, @Query('search') search?: string, @Query('limit') limit?: string) {
+    const role = this.normalizeRole(req.user?.role);
+    if (!['SUPER_ADMIN', 'HOSPITAL_ADMIN', 'PHARMACY_ADMIN', 'MEDIC'].includes(role)) {
+      throw new ForbiddenException('Not allowed to access patient directory.');
+    }
+
+    const take = Math.max(1, Math.min(100, Number(limit || 50)));
+    const normalizedSearch = String(search || '').trim();
+    const viewerId = String(req.user?.userId || '').trim();
+    const orders = InMemoryStore.list('orders') as any[];
+    const hires = InMemoryStore.list('medicHires') as any[];
+
+    let scopedPatientIds: string[] | null = null;
+    if (role === 'MEDIC') {
+      const appointmentRows = await this.prisma.appointment.findMany({
+        where: { medicId: viewerId },
+        select: { patientId: true },
+      });
+      scopedPatientIds = Array.from(
+        new Set(
+          appointmentRows
+            .map((appt) => String(appt.patientId || '').trim())
+            .filter(Boolean),
+        ),
+      );
+    } else if (role === 'HOSPITAL_ADMIN') {
+      const myMedics = hires
+        .filter((hire) => String(hire.hospitalAdminId || '') === viewerId)
+        .map((hire) => String(hire.medicId || '').trim())
+        .filter(Boolean);
+      const appointmentRows = myMedics.length
+        ? await this.prisma.appointment.findMany({
+            where: { medicId: { in: myMedics } },
+            select: { patientId: true },
+          })
+        : [];
+      scopedPatientIds = Array.from(
+        new Set(
+          appointmentRows
+            .map((appt) => String(appt.patientId || '').trim())
+            .filter(Boolean),
+        ),
+      );
+    } else if (role === 'PHARMACY_ADMIN') {
+      scopedPatientIds = Array.from(
+        new Set(
+          orders
+            .filter((order) => String(order.pharmacyId || '') === viewerId)
+            .map((order) => String(order.patientId || '').trim())
+            .filter(Boolean),
+        ),
+      );
+    }
+
+    if (scopedPatientIds && scopedPatientIds.length === 0) {
+      return [];
+    }
+
+    const searchFilter: Prisma.UserWhereInput = normalizedSearch
+      ? {
+          OR: [
+            { fullName: { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive } },
+            { email: { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive } },
+            { phone: { contains: normalizedSearch, mode: Prisma.QueryMode.insensitive } },
+          ],
+        }
+      : {};
+
+    const patients = await this.prisma.user.findMany({
+      where: {
+        role: UserRole.PATIENT,
+        ...(scopedPatientIds ? { id: { in: scopedPatientIds } } : {}),
+        ...searchFilter,
+      },
+      select: {
+        id: true,
+        fullName: true,
+        email: true,
+        phone: true,
+      },
+      orderBy: { createdAt: 'desc' },
+      take,
+    });
+
+    const extrasMap = await getProfileExtrasMap(this.prisma, patients.map((item) => item.id));
+    return patients.map((patient) => ({
+      ...patient,
+      avatarUrl:
+        extrasMap.get(patient.id)?.profilePhoto ||
+        extrasMap.get(patient.id)?.profilePhotoUrl ||
+        null,
+    }));
+  }
+
   @Get('patient-dashboard')
   async getPatientDashboard(@Req() req: any, @Query('patientId') requestedPatientId?: string) {
     const patientId = await this.resolvePatientScope(req, requestedPatientId);
@@ -439,12 +639,10 @@ export class UsersController {
       throw new BadRequestException('Patient account not found.');
     }
 
-    const appointments = (InMemoryStore.list('appointments') as any[])
-      .filter((item) => String(item?.patientId || '') === patientId)
-      .sort(
-        (a, b) =>
-          new Date(b?.date || b?.createdAt || 0).getTime() - new Date(a?.date || a?.createdAt || 0).getTime(),
-      );
+    const appointments = await this.prisma.appointment.findMany({
+      where: { patientId },
+      orderBy: { createdAt: 'desc' },
+    });
     const orders = (InMemoryStore.list('orders') as any[])
       .filter((item) => String(item?.patientId || '') === patientId)
       .sort(
@@ -567,7 +765,9 @@ export class UsersController {
       ...recordsRaw.map((record) => ({
         id: `record-${record.id}`,
         type: 'MEDICAL_RECORD',
-        title: String(record?.type || 'Record').toUpperCase(),
+        title: 'Medical Record',
+        recordType: String(record?.type || 'record').toUpperCase(),
+        medicName: record?.medic?.fullName || null,
         detail: record?.notes || record?.condition || 'Medical record update',
         date: record.createdAt,
       })),
@@ -1147,6 +1347,10 @@ export class UsersController {
       certifications: body.certifications,
       experienceYears: body.experienceYears,
       consultationFee: body.consultationFee,
+      rating: body.rating,
+      availability: body.availability,
+      availableDays: body.availableDays,
+      languages: body.languages,
       availableCounties: body.availableCounties,
       preferredShiftTypes: body.preferredShiftTypes,
       hourlyRate: body.hourlyRate,
@@ -1235,9 +1439,11 @@ export class UsersController {
   async getMapDiscovery(
     @Query('include') include?: string,
     @Query('userId') userId?: string,
+    @Query('service') service?: string,
   ) {
     const roles = this.parseDiscoveryInclude(include);
     const targetUserId = String(userId || '').trim();
+    const serviceFilter = String(service || '').trim().toLowerCase();
 
     const users = await this.prisma.user.findMany({
       where: {
@@ -1297,6 +1503,30 @@ export class UsersController {
       if (!current || (!current.isPrimary && Boolean(link.isPrimary))) {
         tenantByUser.set(key, link);
       }
+    });
+
+    const hospitalTenantIds = Array.from(
+      new Set(
+        tenantLinks
+          .filter((link) => String(link?.tenant?.type || '').toUpperCase() === 'HOSPITAL')
+          .map((link) => String(link?.tenant?.id || link?.tenantId || ''))
+          .filter(Boolean),
+      ),
+    );
+    const db = this.prisma as any;
+    const hospitalServiceRows = hospitalTenantIds.length
+      ? await db.hospitalService.findMany({
+          where: { tenantId: { in: hospitalTenantIds } },
+          select: { tenantId: true, name: true },
+        })
+      : [];
+    const servicesByTenant = new Map<string, string[]>();
+    hospitalServiceRows.forEach((row) => {
+      const key = String(row.tenantId || '');
+      if (!key) return;
+      const list = servicesByTenant.get(key) || [];
+      if (row.name) list.push(String(row.name));
+      servicesByTenant.set(key, list);
     });
 
     const items = users
@@ -1364,16 +1594,36 @@ export class UsersController {
           tenantName: tenant?.name || null,
           tenantType: tenant?.type || null,
           services:
-            Array.isArray(extras.services) && extras.services.length
-              ? extras.services
-              : Array.isArray(extras.specialties)
-                ? extras.specialties
-                : [],
+            role === 'HOSPITAL_ADMIN'
+              ? (() => {
+                  const hospitalServices = tenant?.id
+                    ? servicesByTenant.get(String(tenant.id)) || []
+                    : [];
+                  if (hospitalServices.length) return hospitalServices;
+                  if (Array.isArray(extras.services) && extras.services.length) return extras.services;
+                  if (Array.isArray(extras.specialties) && extras.specialties.length)
+                    return extras.specialties;
+                  return [];
+                })()
+              : Array.isArray(extras.services) && extras.services.length
+                ? extras.services
+                : Array.isArray(extras.specialties)
+                  ? extras.specialties
+                  : [],
         };
       })
       .filter(Boolean);
+    const filteredItems = serviceFilter
+      ? items.filter((item: any) => {
+          if (item?.kind !== 'hospital') return false;
+          const list = Array.isArray(item?.services) ? item.services : [];
+          return list.some((entry: any) =>
+            String(entry || '').toLowerCase().includes(serviceFilter),
+          );
+        })
+      : items;
 
-    return { items };
+    return { items: filteredItems };
   }
 
   @Get(':id/location')
@@ -1396,12 +1646,24 @@ export class UsersController {
       return { location: extras.location || null };
     }
 
-    const appointments = InMemoryStore.list('appointments') as any[];
     const orders = InMemoryStore.list('orders') as any[];
     const hires = InMemoryStore.list('medicHires') as any[];
+    const hireMedics = hires.map((hire) => String(hire.medicId || '').trim()).filter(Boolean);
+    const appointmentRows = await this.prisma.appointment.findMany({
+      where: {
+        OR: [
+          { patientId: viewerId },
+          { medicId: viewerId },
+          { patientId: target.id },
+          { medicId: target.id },
+          ...(hireMedics.length ? [{ medicId: { in: hireMedics } }] : []),
+        ],
+      },
+      select: { patientId: true, medicId: true },
+    });
 
     const hasAppointment = (patientId: string, medicId: string) =>
-      appointments.some(
+      appointmentRows.some(
         (appt) => appt.patientId === patientId && appt.medicId === medicId,
       );
 
@@ -1428,7 +1690,7 @@ export class UsersController {
         const linkedMedics = hires
           .filter((hire) => hire.hospitalAdminId === target.id)
           .map((hire) => hire.medicId);
-        allowed = appointments.some(
+        allowed = appointmentRows.some(
           (appt) => appt.patientId === viewerId && linkedMedics.includes(appt.medicId),
         );
       }
@@ -1451,7 +1713,7 @@ export class UsersController {
         const linkedMedics = hires
           .filter((hire) => hire.hospitalAdminId === viewerId)
           .map((hire) => hire.medicId);
-        allowed = appointments.some(
+        allowed = appointmentRows.some(
           (appt) => appt.patientId === target.id && linkedMedics.includes(appt.medicId),
         );
       }
@@ -1476,9 +1738,32 @@ export class UsersController {
     const viewerId = req.user?.userId;
     const viewerRole = req.user?.role;
 
-    const appointments = InMemoryStore.list('appointments') as any[];
     const orders = InMemoryStore.list('orders') as any[];
     const hires = InMemoryStore.list('medicHires') as any[];
+    const appointments =
+      viewerRole === 'PATIENT'
+        ? await this.prisma.appointment.findMany({
+            where: { patientId: viewerId },
+            select: { patientId: true, medicId: true },
+          })
+        : viewerRole === 'MEDIC'
+          ? await this.prisma.appointment.findMany({
+              where: { medicId: viewerId },
+              select: { patientId: true, medicId: true },
+            })
+          : viewerRole === 'HOSPITAL_ADMIN'
+            ? await this.prisma.appointment.findMany({
+                where: {
+                  medicId: {
+                    in: hires
+                      .filter((hire) => hire.hospitalAdminId === viewerId)
+                      .map((hire) => hire.medicId)
+                      .filter(Boolean),
+                  },
+                },
+                select: { patientId: true, medicId: true },
+              })
+            : [];
 
     const linkedIds = new Set<string>();
 
@@ -1503,7 +1788,9 @@ export class UsersController {
     if (viewerRole === 'PATIENT') {
       appointments
         .filter((appt) => appt.patientId === viewerId)
-        .forEach((appt) => linkedIds.add(appt.medicId));
+        .forEach((appt) => {
+          if (appt.medicId) linkedIds.add(appt.medicId);
+        });
       orders
         .filter((order) => order.patientId === viewerId)
         .forEach((order) => linkedIds.add(order.pharmacyId));

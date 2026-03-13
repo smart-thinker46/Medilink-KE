@@ -91,7 +91,9 @@ export class AdminController {
     );
 
     const shifts = InMemoryStore.list('shifts') as any[];
-    const appointments = InMemoryStore.list('appointments') as any[];
+    const appointments = await this.prisma.appointment.findMany({
+      select: { medicId: true, status: true },
+    });
     const orders = InMemoryStore.list('orders') as any[];
 
     const topHospitals = this.rankByCount(shifts, 'createdBy');
@@ -188,6 +190,110 @@ export class AdminController {
         pharmacies: await this.mapUsers(topPharmacies),
       },
       complaintsCount: complaints.length,
+    };
+  }
+
+  @Get('products')
+  async listMarketplaceProducts(
+    @Query('search') search?: string,
+    @Query('category') category?: string,
+    @Query('location') location?: string,
+    @Query('sellerType') sellerType?: string,
+  ) {
+    const rawSeller = String(sellerType || '').trim().toUpperCase();
+    const normalizedSeller =
+      rawSeller === 'PHARMACY_ADMIN'
+        ? 'PHARMACY'
+        : rawSeller === 'HOSPITAL_ADMIN'
+          ? 'HOSPITAL'
+          : rawSeller;
+    const allowedTypes = normalizedSeller
+      ? [normalizedSeller]
+      : ['PHARMACY', 'HOSPITAL'];
+
+    const products = await this.db.product.findMany();
+    const tenantIds: string[] = Array.from(
+      new Set(
+        products
+          .map((item: any) => item?.pharmacyId)
+          .filter((id: any): id is string => typeof id === 'string' && id.trim().length > 0),
+      ),
+    );
+
+    const tenants: any[] = tenantIds.length
+      ? await (this.prisma as any).tenant.findMany({
+          where: { id: { in: tenantIds }, type: { in: allowedTypes as any } },
+          include: { users: { include: { user: true } } },
+        })
+      : [];
+
+    const tenantUserIds = tenants
+      .map((tenant) => {
+        const primaryLink = tenant.users?.find((link) => link.isPrimary) || tenant.users?.[0];
+        return primaryLink?.userId;
+      })
+      .filter(Boolean) as string[];
+    const extrasMap = await getProfileExtrasMap(this.prisma, tenantUserIds);
+
+    const tenantMap = new Map<string, any>();
+    tenants.forEach((tenant) => {
+      const primaryLink = tenant.users?.find((link) => link.isPrimary) || tenant.users?.[0];
+      const userId = primaryLink?.userId;
+      const extras = userId ? extrasMap.get(userId) || {} : {};
+      const type = String(tenant.type || '').toUpperCase();
+      const name =
+        type === 'HOSPITAL'
+          ? extras.hospitalName || tenant.name
+          : extras.pharmacyName || tenant.name;
+      tenantMap.set(tenant.id, {
+        id: tenant.id,
+        name: name || tenant.name,
+        type: type || 'PHARMACY',
+        location: extras.locationAddress || extras.location || tenant.location,
+        phone: tenant.phone,
+        email: tenant.email,
+        status: tenant.status,
+        subscriptionStatus: tenant.subscriptionStatus,
+      });
+    });
+
+    let mappedProducts: any[] = products
+      .map((product: any) => {
+        const seller = tenantMap.get(product.pharmacyId);
+        if (!seller) return null;
+        return {
+          ...product,
+          seller,
+          sellerType: seller.type,
+        };
+      })
+      .filter(Boolean);
+
+    if (search) {
+      const value = search.toLowerCase();
+      mappedProducts = mappedProducts.filter(
+        (product) =>
+          String(product.name || '').toLowerCase().includes(value) ||
+          String(product.description || '').toLowerCase().includes(value),
+      );
+    }
+    if (category) {
+      const value = category.toLowerCase();
+      mappedProducts = mappedProducts.filter((product) =>
+        String(product.category || '').toLowerCase().includes(value),
+      );
+    }
+    if (location) {
+      const value = location.toLowerCase();
+      mappedProducts = mappedProducts.filter((product) =>
+        String(product.seller?.location || '').toLowerCase().includes(value),
+      );
+    }
+
+    return {
+      products: mappedProducts,
+      pharmacies: Array.from(tenantMap.values()).filter((item) => item.type === 'PHARMACY'),
+      hospitals: Array.from(tenantMap.values()).filter((item) => item.type === 'HOSPITAL'),
     };
   }
 
@@ -367,7 +473,10 @@ export class AdminController {
       );
       const aiEnabled = Boolean((extras as any).aiEnabled || aiAccessGrantedByAdmin);
       const aiAccessAllowed = Boolean(
-        aiEnabled && (paidPremium || aiAccessGrantedByAdmin || user.role === UserRole.SUPER_ADMIN),
+        aiEnabled &&
+          (paidPremium ||
+            aiAccessGrantedByAdmin ||
+            user.role === UserRole.SUPER_ADMIN),
       );
       return {
         id: user.id,
@@ -900,10 +1009,12 @@ export class AdminController {
   }
 
   @Get('operations')
-  async operations() {
+  async operations(@Query() query: any = {}) {
     const shifts = InMemoryStore.list('shifts') as any[];
     const hires = InMemoryStore.list('medicHires') as any[];
-    const appointments = InMemoryStore.list('appointments') as any[];
+    const appointments = await this.prisma.appointment.findMany({
+      select: { patientId: true, medicId: true, status: true },
+    });
 
     const userIds = Array.from(
       new Set([
@@ -979,6 +1090,58 @@ export class AdminController {
       createdAt: hire.createdAt,
     }));
 
+    const normalizeDate = (value?: string | null) => {
+      if (!value) return null;
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return null;
+      return date;
+    };
+    const normalizeEndDate = (value?: string | null) => {
+      if (!value) return null;
+      const date = new Date(`${value}T23:59:59.999`);
+      if (Number.isNaN(date.getTime())) return null;
+      return date;
+    };
+    const matchesDateRange = (value: string | null, start?: string, end?: string) => {
+      const date = normalizeDate(value || undefined);
+      if (!date) return false;
+      const startDate = start ? normalizeDate(start) : null;
+      const endDate = end ? normalizeEndDate(end) : null;
+      if (startDate && date < startDate) return false;
+      if (endDate && date > endDate) return false;
+      return true;
+    };
+
+    const hireStatus = String(query?.hireStatus || 'ALL').toUpperCase();
+    const hireSearch = String(query?.hireSearch || '').trim().toLowerCase();
+    const hireStart = String(query?.hireStart || '').trim();
+    const hireEnd = String(query?.hireEnd || '').trim();
+    const filteredHiresDetailed =
+      hireStatus !== 'ALL' || hireSearch || hireStart || hireEnd
+        ? hiresDetailed.filter((hire) => {
+            const status = String(hire?.status || 'HIRED').toUpperCase();
+            if (hireStatus !== 'ALL' && status !== hireStatus) return false;
+            if (hireSearch) {
+              const haystack = [
+                hire?.medicName,
+                hire?.hospitalName,
+                hire?.hospitalAdminId,
+                hire?.medicId,
+              ]
+                .filter(Boolean)
+                .join(' ')
+                .toLowerCase();
+              if (!haystack.includes(hireSearch)) return false;
+            }
+            if (hireStart || hireEnd) {
+              if (!matchesDateRange(String(hire?.createdAt || ''), hireStart, hireEnd)) {
+                return false;
+              }
+            }
+            return true;
+          })
+        : hiresDetailed;
+
     const patientMedicCounts = appointments.reduce((acc, appointment) => {
       const patientId = appointment?.patientId;
       const medicId = appointment?.medicId;
@@ -1050,7 +1213,7 @@ export class AdminController {
       shiftStatuses,
       hospitalsWhoCreatedShifts,
       shiftApplications,
-      hiresDetailed,
+      hiresDetailed: filteredHiresDetailed,
       medicHiredByPatients,
       topMedic,
       topHospitalDaily,
@@ -1059,7 +1222,7 @@ export class AdminController {
 
   @Get('reports/activities')
   async activityReport() {
-    const operations = await this.operations();
+    const operations = await this.operations({});
     const auditLogs = InMemoryStore.list('auditLogs') as any[];
     const notifications = InMemoryStore.list('notifications') as any[];
     const messages = await this.prisma.message.findMany({
@@ -1511,6 +1674,7 @@ export class AdminController {
       voiceAi: true,
       premiumEnforcement: true,
       adminControlCenter: true,
+      aiVoiceSpeed: 1,
     };
   }
 
@@ -1521,10 +1685,18 @@ export class AdminController {
       options,
       process.env.PIPER_MODEL,
     );
+    const rawSpeed = Number(flags?.aiVoiceSpeed ?? 1);
+    const speed = Number.isFinite(rawSpeed) ? Math.min(Math.max(rawSpeed, 0.6), 1.4) : 1;
     return {
       selectedModel: selectedModel || null,
       options,
       configured: options.length > 0,
+      speed,
+      speedRange: {
+        min: 0.6,
+        max: 1.4,
+        step: 0.1,
+      },
     };
   }
 
@@ -2371,8 +2543,19 @@ export class AdminController {
   async updateAiVoiceConfig(@Req() req: any, @Body() body: any) {
     await this.assertPermission(req, 'FEATURE_FLAGS_MANAGE');
     const requestedModel = String(body?.model || '').trim();
-    if (!requestedModel) {
-      throw new BadRequestException('model is required.');
+    const speedInput = body?.speed;
+    const hasModel = Boolean(requestedModel);
+    const hasSpeed = speedInput !== undefined && speedInput !== null && speedInput !== '';
+    const requestedSpeed = hasSpeed ? Number(speedInput) : null;
+
+    if (!hasModel && !hasSpeed) {
+      throw new BadRequestException('model or speed is required.');
+    }
+    if (hasSpeed && !Number.isFinite(requestedSpeed)) {
+      throw new BadRequestException('speed must be a valid number.');
+    }
+    if (hasSpeed && (requestedSpeed as number) < 0.6 || (requestedSpeed as number) > 1.4) {
+      throw new BadRequestException('speed must be between 0.6 and 1.4.');
     }
 
     const singleton = (await this.ensureSingleton('featureFlags', {
@@ -2383,7 +2566,7 @@ export class AdminController {
     const voiceConfig = this.buildAiVoiceConfig(currentFlags);
     const allowedModels = new Set(voiceConfig.options.map((item) => item.model));
 
-    if (!allowedModels.has(requestedModel)) {
+    if (hasModel && !allowedModels.has(requestedModel)) {
       throw new BadRequestException(
         'Selected voice model is not in PIPER_MODEL_VARIANTS/PIPER_MODEL configuration.',
       );
@@ -2392,7 +2575,8 @@ export class AdminController {
     const flags = {
       ...this.defaultFeatureFlags(),
       ...currentFlags,
-      aiVoiceDefaultModel: requestedModel,
+      ...(hasModel ? { aiVoiceDefaultModel: requestedModel } : {}),
+      ...(hasSpeed ? { aiVoiceSpeed: requestedSpeed } : {}),
     };
 
     const updated = await this.dbUpdate('featureFlag', singleton.id, {
@@ -2407,7 +2591,7 @@ export class AdminController {
       targetId: singleton.id,
       by: req.user?.userId,
       createdAt: new Date().toISOString(),
-      details: { model: requestedModel },
+      details: { model: requestedModel || null, speed: hasSpeed ? requestedSpeed : null },
     });
 
     const nextFlags = (updated as any)?.flags || flags;

@@ -35,11 +35,15 @@ export class PushService {
     return admin;
   }
 
-  async sendToTokens(tokens: string[], payload: { title: string; body: string; data?: any }) {
+  async sendToTokens(
+    tokens: string[],
+    payload: { title: string; body: string; data?: any; badge?: number; sound?: string },
+  ) {
     if (!tokens?.length) return { success: false, reason: 'no_tokens' };
     const admin = this.getAdmin();
     if (!admin) return { success: false, reason: 'no_admin' };
     try {
+      const sound = payload.sound || 'default';
       const response = await admin.messaging().sendEachForMulticast({
         tokens,
         notification: { title: payload.title, body: payload.body },
@@ -48,8 +52,16 @@ export class PushService {
               Object.entries(payload.data).map(([key, value]) => [key, String(value)]),
             )
           : undefined,
-        android: { priority: 'high' },
-        apns: { headers: { 'apns-priority': '10' } },
+        android: { priority: 'high', notification: { sound } },
+        apns: {
+          headers: { 'apns-priority': '10' },
+          payload: {
+            aps: {
+              sound,
+              ...(Number.isFinite(payload.badge) ? { badge: Math.max(0, payload.badge || 0) } : {}),
+            },
+          },
+        },
       });
       return { success: true, response };
     } catch (error) {

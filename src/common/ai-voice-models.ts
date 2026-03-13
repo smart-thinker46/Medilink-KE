@@ -5,8 +5,15 @@ export type AiVoiceModelOption = {
   id: string;
   label: string;
   model: string;
+  language?: string | null;
   exists: boolean;
   isDefault: boolean;
+};
+
+type VoiceEntry = {
+  label: string;
+  model: string;
+  language: string | null;
 };
 
 const toText = (value: unknown) => String(value || '').trim();
@@ -24,50 +31,56 @@ const deriveLabelFromModel = (modelPath: string) =>
     .replace(/\s+/g, ' ')
     .trim() || 'Voice';
 
-const parseVoiceEntry = (raw: string) => {
+const parseVoiceEntry = (raw: string): VoiceEntry | null => {
   const entry = toText(raw);
   if (!entry) return null;
   const equalIndex = entry.indexOf('=');
   if (equalIndex > 0) {
     const label = toText(entry.slice(0, equalIndex));
-    const model = toText(entry.slice(equalIndex + 1));
+    const remainder = toText(entry.slice(equalIndex + 1));
+    const parts = remainder.split('|').map((item) => toText(item)).filter(Boolean);
+    const model = parts[0] || '';
     if (!model) return null;
     return {
       label: label || deriveLabelFromModel(model),
       model,
+      language: parts[1] || null,
     };
   }
-  const pipeIndex = entry.indexOf('|');
-  if (pipeIndex > 0) {
-    const label = toText(entry.slice(0, pipeIndex));
-    const model = toText(entry.slice(pipeIndex + 1));
+  const pipeParts = entry.split('|').map((item) => toText(item)).filter(Boolean);
+  if (pipeParts.length >= 2) {
+    const label = pipeParts[0];
+    const model = pipeParts[1];
     if (!model) return null;
     return {
       label: label || deriveLabelFromModel(model),
       model,
+      language: pipeParts[2] || null,
     };
   }
   return {
     label: deriveLabelFromModel(entry),
     model: entry,
+    language: null,
   };
 };
 
 export function getConfiguredAiVoiceModels(env: NodeJS.ProcessEnv = process.env): AiVoiceModelOption[] {
   const defaultModel = toText(env.PIPER_MODEL);
   const variantsRaw = toText(env.PIPER_MODEL_VARIANTS || env.PIPER_VOICE_MODELS);
-  const parsedVariants = variantsRaw
+  const parsedVariants: VoiceEntry[] = variantsRaw
     ? variantsRaw
         .split(',')
         .map((item) => parseVoiceEntry(item))
-        .filter((item): item is { label: string; model: string } => Boolean(item))
+        .filter((item): item is VoiceEntry => Boolean(item))
     : [];
 
-  const merged = [...parsedVariants];
+  const merged: VoiceEntry[] = [...parsedVariants];
   if (defaultModel && !merged.some((item) => item.model === defaultModel)) {
     merged.unshift({
       label: 'Default Voice',
       model: defaultModel,
+      language: null,
     });
   }
 
@@ -91,6 +104,7 @@ export function getConfiguredAiVoiceModels(env: NodeJS.ProcessEnv = process.env)
       id,
       label: toText(item.label) || `Voice ${index + 1}`,
       model,
+      language: toText(item.language || '') || null,
       exists: existsSync(model),
       isDefault: model === defaultModel,
     });

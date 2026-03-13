@@ -5,6 +5,8 @@ import helmet from 'helmet';
 import compression from 'compression';
 import { winstonLogger } from './common/logger/winston.logger';
 import { ZodValidationPipe } from 'nestjs-zod';
+import { PrismaService } from './database/prisma.service';
+import { InMemoryStore } from './common/in-memory.store';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -30,6 +32,10 @@ async function bootstrap() {
   app.useGlobalPipes(new ZodValidationPipe());
 
   app.setGlobalPrefix('api');
+
+  const prisma = app.get(PrismaService);
+  await InMemoryStore.hydrate(prisma);
+  InMemoryStore.configure(prisma);
 
   await app.listen(process.env.PORT ?? 3000, '0.0.0.0');
 }

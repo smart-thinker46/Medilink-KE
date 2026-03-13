@@ -164,6 +164,19 @@ export class MedicsController {
           : Array.isArray(extras.preferredShiftTypes)
             ? extras.preferredShiftTypes
             : [];
+      const availability =
+        extras.availability ||
+        (Array.isArray(availabilityDays) && availabilityDays.length
+          ? availabilityDays.join(', ')
+          : '');
+      const languages = Array.isArray(extras.languages)
+        ? extras.languages
+        : typeof extras.languages === 'string'
+          ? extras.languages
+              .split(',')
+              .map((value: string) => value.trim())
+              .filter(Boolean)
+          : [];
       return {
         id: medic.id,
         name: medic.fullName,
@@ -171,6 +184,7 @@ export class MedicsController {
         lastName: medic.fullName?.split(' ').slice(1).join(' '),
         email: medic.email,
         phone: medic.phone || extras.phone || null,
+        avatarUrl: extras.profilePhoto || extras.avatarUrl || null,
         specialization: medic.medicProfile?.specialization || extras.specialization,
         experienceYears: medic.medicProfile?.experienceYears || extras.experienceYears,
         category: extras.category || extras.services || extras.specialty,
@@ -183,8 +197,10 @@ export class MedicsController {
             ? { lat: locationLat, lng: locationLng }
             : null,
         availabilityDays,
+        availability,
+        languages,
         cv: extras.cv || null,
-        rating: 4.7,
+        rating: extras.rating ?? 4.7,
       };
     });
 

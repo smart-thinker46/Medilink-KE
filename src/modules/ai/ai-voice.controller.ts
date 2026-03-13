@@ -57,6 +57,24 @@ export class AiVoiceController {
     }
   }
 
+  private async getAdminVoiceSpeed() {
+    const fallback = 1;
+    try {
+      const db = this.prisma as any;
+      const singleton = await db?.featureFlag?.findFirst?.({
+        orderBy: { createdAt: 'asc' },
+      });
+      const flags = singleton?.flags || {};
+      const value = Number(flags?.aiVoiceSpeed ?? fallback);
+      return Number.isFinite(value) ? Math.min(Math.max(value, 0.6), 1.4) : fallback;
+    } catch {
+      const localSingleton = (InMemoryStore.list('featureFlags') as any[])[0] || {};
+      const flags = localSingleton?.flags || {};
+      const value = Number(flags?.aiVoiceSpeed ?? fallback);
+      return Number.isFinite(value) ? Math.min(Math.max(value, 0.6), 1.4) : fallback;
+    }
+  }
+
   private async ensureVoiceAccess(user: any) {
     const access = await this.aiService.getAccessState(user);
     if (!access?.canUse) {
@@ -66,15 +84,17 @@ export class AiVoiceController {
 
   @Get('local-status')
   async localStatus() {
-    const [status, selectedModel] = await Promise.all([
+    const [status, selectedModel, speed] = await Promise.all([
       this.localVoice.getStatus(),
       this.getAdminSelectedVoiceModel(),
+      this.getAdminVoiceSpeed(),
     ]);
     return {
       ...status,
       tts: {
         ...(status?.tts || {}),
         selectedModel: selectedModel || null,
+        speed,
       },
     };
   }
@@ -100,8 +120,13 @@ export class AiVoiceController {
     const payload = {
       ...(body || {}),
     };
-    if (!payload?.model) {
-      payload.model = await this.getAdminSelectedVoiceModel();
+    const [model, speed] = await Promise.all([
+      this.getAdminSelectedVoiceModel(),
+      this.getAdminVoiceSpeed(),
+    ]);
+    if (!payload?.model) payload.model = model;
+    if (payload?.speed === undefined || payload?.speed === null || payload?.speed === '') {
+      payload.speed = speed;
     }
     return this.localVoice.synthesize(payload);
   }

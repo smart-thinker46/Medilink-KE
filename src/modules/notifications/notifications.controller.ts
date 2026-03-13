@@ -55,11 +55,16 @@ export class NotificationsController {
 
       const extras = await getProfileExtras(this.prisma, body.user_id);
       const tokens = Array.isArray(extras.pushTokens) ? extras.pushTokens : [];
+      const unreadCount = InMemoryStore.list('notifications').filter(
+        (item) => item.userId === body.user_id && !item.isRead,
+      ).length;
       if (tokens.length) {
         await this.push.sendToTokens(tokens, {
           title: body.title || 'Notification',
           body: body.message || '',
-          data: body.data || {},
+          data: { ...(body.data || {}), badge: unreadCount },
+          badge: unreadCount,
+          sound: 'default',
         });
       }
     }

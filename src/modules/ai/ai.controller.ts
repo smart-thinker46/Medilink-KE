@@ -27,7 +27,7 @@ export class AiController {
   @UseGuards(AuthGuard('jwt'))
   @Post('assistant')
   async assistant(@Req() req: any, @Body() body: any) {
-    return this.aiService.quickAssistant(body, req.user);
+    return this.aiService.assistantChat(body, req.user);
   }
 
   @UseGuards(AuthGuard('jwt'))

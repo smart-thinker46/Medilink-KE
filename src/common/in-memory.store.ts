@@ -3,6 +3,10 @@ import { randomUUID } from 'crypto';
 export type InMemoryRecord = Record<string, any> & { id: string };
 
 export class InMemoryStore {
+  private static prisma: any | null = null;
+  private static hydrated = false;
+  private static persistenceEnabled =
+    String(process.env.IN_MEMORY_STORE_PERSIST || 'true').toLowerCase() === 'true';
   private static data: Record<string, InMemoryRecord[]> = {
     appointments: [],
     medicalRecords: [],
@@ -27,6 +31,7 @@ export class InMemoryStore {
     aiVoiceSessions: [],
     aiVoiceEvents: [],
     aiToolAudits: [],
+    aiConversations: [],
     pharmacyEvents: [],
     purchaseOrders: [],
     smartAlertRuns: [],
@@ -49,12 +54,73 @@ export class InMemoryStore {
     MEDIC: { monthly: 300, yearly: 4800 },
     PHARMACY_ADMIN: { monthly: 500, yearly: 10000 },
     HOSPITAL_ADMIN: { monthly: 1000, yearly: 12000 },
-    PATIENT: { monthly: 0, yearly: 0 },
+    PATIENT: { monthly: 100, yearly: 1200 },
   };
+
+  static configure(prisma: any) {
+    InMemoryStore.prisma = prisma;
+  }
+
+  static async hydrate(prisma: any) {
+    if (!InMemoryStore.persistenceEnabled || InMemoryStore.hydrated) {
+      return;
+    }
+    InMemoryStore.prisma = prisma;
+    const collections = new Set(Object.keys(InMemoryStore.data));
+    const records = await prisma.inMemoryRecord.findMany({
+      where: { collection: { in: Array.from(collections) } },
+    });
+    Object.keys(InMemoryStore.data).forEach((key) => {
+      InMemoryStore.data[key] = [];
+    });
+    records.forEach((record: any) => {
+      const collection = String(record.collection || '');
+      if (!collection || !(collection in InMemoryStore.data)) return;
+      const payload = record.data && typeof record.data === 'object' ? record.data : {};
+      InMemoryStore.data[collection].push({ ...payload, id: record.id });
+    });
+    InMemoryStore.hydrated = true;
+  }
+
+  private static persistCreate(collection: string, record: InMemoryRecord) {
+    if (!InMemoryStore.persistenceEnabled || !InMemoryStore.prisma) return;
+    const { id, ...payload } = record;
+    void InMemoryStore.prisma.inMemoryRecord
+      .create({
+        data: {
+          id,
+          collection,
+          data: payload,
+        },
+      })
+      .catch(() => undefined);
+  }
+
+  private static persistUpdate(collection: string, record: InMemoryRecord) {
+    if (!InMemoryStore.persistenceEnabled || !InMemoryStore.prisma) return;
+    const { id, ...payload } = record;
+    void InMemoryStore.prisma.inMemoryRecord
+      .update({
+        where: { id },
+        data: {
+          collection,
+          data: payload,
+        },
+      })
+      .catch(() => undefined);
+  }
+
+  private static persistRemove(id: string) {
+    if (!InMemoryStore.persistenceEnabled || !InMemoryStore.prisma) return;
+    void InMemoryStore.prisma.inMemoryRecord
+      .delete({ where: { id } })
+      .catch(() => undefined);
+  }
 
   static create<T extends InMemoryRecord>(collection: keyof typeof InMemoryStore.data, payload: Omit<T, 'id'>) {
     const record = { id: randomUUID(), ...payload } as T;
     InMemoryStore.data[collection].push(record);
+    InMemoryStore.persistCreate(String(collection), record);
     return record;
   }
 
@@ -71,6 +137,7 @@ export class InMemoryStore {
     const index = items.findIndex((item) => item.id === id);
     if (index === -1) return null;
     items[index] = { ...items[index], ...payload } as T;
+    InMemoryStore.persistUpdate(String(collection), items[index]);
     return items[index];
   }
 
@@ -79,6 +146,7 @@ export class InMemoryStore {
     const index = items.findIndex((item) => item.id === id);
     if (index === -1) return false;
     items.splice(index, 1);
+    InMemoryStore.persistRemove(id);
     return true;
   }
 

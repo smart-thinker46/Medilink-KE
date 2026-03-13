@@ -2,9 +2,11 @@ import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { InMemoryStore } from 'src/common/in-memory.store';
-import { mergeProfileExtras } from 'src/common/profile-extras';
+import { getProfileExtras, mergeProfileExtras } from 'src/common/profile-extras';
 import { PrismaService } from 'src/database/prisma.service';
 import { EmailsService } from '../emails/emails.service';
+import { NotificationsGateway } from '../notifications/notifications.gateway';
+import { PushService } from 'src/common/push.service';
 
 @Injectable()
 export class IntaSendService {
@@ -14,6 +16,8 @@ export class IntaSendService {
     private config: ConfigService,
     private emails: EmailsService,
     private prisma: PrismaService,
+    private notificationsGateway: NotificationsGateway,
+    private push: PushService,
   ) {}
 
   private get keyMode(): 'live' | 'test' | 'unknown' {
@@ -38,11 +42,21 @@ export class IntaSendService {
   }
 
   private get publishableKey() {
-    return String(this.config.get('INTASEND_PUBLISHABLE_KEY') || '').trim();
+    return String(
+      this.config.get('INTASEND_PUBLISHABLE_KEY') ||
+        this.config.get('INTASEND_PUBLIC_KEY') ||
+        this.config.get('INTASEND_PUB_KEY') ||
+        '',
+    ).trim();
   }
 
   private get secretKey() {
-    return String(this.config.get('INTASEND_SECRET_KEY') || '').trim();
+    return String(
+      this.config.get('INTASEND_SECRET_KEY') ||
+        this.config.get('INTASEND_PRIVATE_KEY') ||
+        this.config.get('INTASEND_SECRET') ||
+        '',
+    ).trim();
   }
 
   private get redirectUrl() {
@@ -53,9 +67,43 @@ export class IntaSendService {
     return String(this.config.get('INTASEND_CALLBACK_URL') || '').trim();
   }
 
+  private normalizeHttpUrl(raw?: string) {
+    const value = String(raw || '').trim();
+    if (!value) return null;
+    try {
+      const parsed = new URL(value);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return null;
+      }
+      return parsed.toString();
+    } catch {
+      return null;
+    }
+  }
+
   private get checkoutHeaders() {
     return {
       'X-IntaSend-Public-API-Key': this.publishableKey,
+    };
+  }
+
+  getStatus() {
+    const publishableKey = this.publishableKey;
+    const secretKey = this.secretKey;
+    const mismatch = this.isEnvironmentMismatch();
+    const secretMatchesPublishable =
+      Boolean(secretKey) && Boolean(publishableKey) && secretKey === publishableKey;
+    return {
+      configured: Boolean(publishableKey),
+      publishableKeyPresent: Boolean(publishableKey),
+      secretKeyPresent: Boolean(secretKey),
+      secretMatchesPublishable,
+      mode: this.keyMode,
+      baseUrl: this.baseUrl,
+      checkoutEndpoint: this.checkoutEndpoint,
+      redirectUrl: this.redirectUrl || null,
+      callbackUrl: this.callbackUrl || null,
+      environmentMismatch: mismatch,
     };
   }
 
@@ -87,6 +135,20 @@ export class IntaSendService {
       error?.message ||
       'Failed to initialize IntaSend payment.'
     );
+  }
+
+  private appendQueryParams(url: string, params: Record<string, string>) {
+    try {
+      const target = new URL(url);
+      Object.entries(params).forEach(([key, value]) => {
+        if (!target.searchParams.has(key)) {
+          target.searchParams.set(key, value);
+        }
+      });
+      return target.toString();
+    } catch {
+      return url;
+    }
   }
 
   private shouldRetryCheckout(error: any) {
@@ -121,6 +183,12 @@ export class IntaSendService {
         'IntaSend is not configured. Set INTASEND_PUBLISHABLE_KEY.',
       );
     }
+    const configStatus = this.getStatus();
+    if (configStatus.secretMatchesPublishable) {
+      this.logger.warn(
+        'IntaSend secret key matches publishable key. Please set the correct INTASEND_SECRET_KEY.',
+      );
+    }
 
     const amount = Number(payload.amount || 0);
     if (!Number.isFinite(amount) || amount <= 0) {
@@ -138,8 +206,26 @@ export class IntaSendService {
     if (payload.email) requestBody.email = payload.email;
     const normalizedPhone = this.normalizePhone(payload.phone);
     if (normalizedPhone) requestBody.phone_number = normalizedPhone;
-    if (this.redirectUrl) requestBody.redirect_url = this.redirectUrl;
-    if (this.callbackUrl) requestBody.callback_url = this.callbackUrl;
+    const redirectUrl = this.normalizeHttpUrl(this.redirectUrl);
+    if (!redirectUrl && this.redirectUrl) {
+      this.logger.warn(
+        'INTASEND_REDIRECT_URL is invalid. Skipping redirect_url to avoid checkout errors.',
+      );
+    }
+    if (redirectUrl) {
+      requestBody.redirect_url = this.appendQueryParams(redirectUrl, {
+        api_ref: payload.apiRef,
+        amount: String(amount),
+        currency: String(payload.currency || 'KES').toUpperCase(),
+      });
+    }
+    const callbackUrl = this.normalizeHttpUrl(this.callbackUrl);
+    if (!callbackUrl && this.callbackUrl) {
+      this.logger.warn(
+        'INTASEND_CALLBACK_URL is invalid. Skipping callback_url to avoid checkout errors.',
+      );
+    }
+    if (callbackUrl) requestBody.callback_url = callbackUrl;
 
     const attempts: Array<{
       label: string;
@@ -347,7 +433,67 @@ export class IntaSendService {
       }
     }
 
+    if (payment.type === 'APPOINTMENT' && payment.appointmentId) {
+      const appointment = await this.prisma.appointment
+        .update({
+          where: { id: payment.appointmentId },
+          data: { paymentId: payment.id, paidAt: new Date() },
+        })
+        .catch(() => null);
+      if (appointment) {
+        const notice = `Appointment payment received. Status: ${appointment.status || 'pending'}.`;
+        await this.sendAppointmentPaymentNotice(appointment.patientId, appointment.id, notice);
+        if (appointment.medicId) {
+          await this.sendAppointmentPaymentNotice(appointment.medicId, appointment.id, notice);
+        }
+      }
+    }
+
+    if (payment.requestId) {
+      InMemoryStore.update('payment_requests', payment.requestId, {
+        status: 'PAID',
+        paidAt: new Date().toISOString(),
+        paymentId: payment.id,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
     return payment;
+  }
+
+  private async sendAppointmentPaymentNotice(userId: string, appointmentId: string, message: string) {
+    if (!userId) return;
+    const notification = InMemoryStore.create('notifications', {
+      userId,
+      title: 'Appointment Payment',
+      message,
+      type: 'APPOINTMENT',
+      relatedId: appointmentId,
+      data: { appointmentId, status: 'paid' },
+      isRead: false,
+      createdAt: new Date().toISOString(),
+    });
+    this.notificationsGateway.emitToUser(userId, {
+      title: notification.title,
+      message: notification.message,
+      type: notification.type,
+      data: notification.data,
+    });
+
+    const extras = await getProfileExtras(this.prisma, userId);
+    const tokens = Array.isArray(extras.pushTokens) ? extras.pushTokens : [];
+    const unreadCount = InMemoryStore.list('notifications').filter(
+      (item) => item.userId === userId && !item.isRead,
+    ).length;
+    if (tokens.length) {
+      await this.push.sendToTokens(tokens, {
+        title: notification.title,
+        body: notification.message,
+        data: { ...(notification.data || {}), badge: unreadCount },
+        badge: unreadCount,
+        sound: 'default',
+      });
+    }
   }
 
   async handleWebhook(body: any, headers?: Record<string, any>) {

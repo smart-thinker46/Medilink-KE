@@ -8,6 +8,7 @@ import { UserRole } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 import { createHmac } from 'crypto';
 import { NotificationsGateway } from '../notifications/notifications.gateway';
+import axios from 'axios';
 
 @Controller('video-calls')
 @UseGuards(AuthGuard('jwt'))
@@ -17,6 +18,53 @@ export class VideoCallsController {
     private config: ConfigService,
     private notificationsGateway: NotificationsGateway,
   ) {}
+
+  private toDate(value?: string | Date | null) {
+    if (!value) return undefined;
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return undefined;
+    return date;
+  }
+
+  private async persistCall(call: any) {
+    try {
+      return await this.prisma.videoCall.create({
+        data: {
+          id: call.id,
+          callerId: call.callerId,
+          participantId: call.participantId || null,
+          callerRole: call.callerRole || null,
+          callType: call.callType || null,
+          appointmentId: call.appointmentId || null,
+          paymentId: call.paymentId || null,
+          minutes: call.minutes ? Number(call.minutes) : null,
+          mode: call.mode || null,
+          status: call.status || 'RINGING',
+          createdAt: this.toDate(call.createdAt) || undefined,
+          metadata: call.metadata || null,
+        },
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  private async updateCall(id: string, data: Record<string, any>) {
+    try {
+      return await this.prisma.videoCall.update({
+        where: { id },
+        data,
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  private async getCallById(id: string) {
+    const memoryCall = InMemoryStore.findById('videoCalls', id);
+    if (memoryCall) return memoryCall;
+    return this.prisma.videoCall.findUnique({ where: { id } });
+  }
 
   private async resolveParticipantUserId(participantId?: string) {
     if (!participantId) return null;
@@ -122,6 +170,76 @@ export class VideoCallsController {
     return `${content}.${signature}`;
   }
 
+  private async ensureStreamUser(userId: string, user: any) {
+    const apiKey = this.getStreamApiKey();
+    const secret = this.getStreamApiSecret();
+    if (!apiKey || !secret) return;
+    try {
+      const serverToken = this.buildStreamUserToken('server', secret, 60);
+      await axios.post(
+        `https://video.stream-io-api.com/video/users?api_key=${apiKey}`,
+        {
+          users: [
+            {
+              id: String(userId),
+              name: user?.fullName || user?.email || String(userId),
+              image:
+                user?.profilePhoto ||
+                user?.avatarUrl ||
+                user?.photoUrl ||
+                null,
+            },
+          ],
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${serverToken}`,
+            'stream-auth-type': 'jwt',
+          },
+        },
+      );
+    } catch {
+      // best-effort: ignore if Stream user upsert fails
+    }
+  }
+
+  @Get('stream-status')
+  async streamStatus(@Req() req: any) {
+    if (req.user?.role !== 'SUPER_ADMIN') {
+      throw new ForbiddenException('Only super admins can view Stream status.');
+    }
+    const apiKey = this.getStreamApiKey();
+    const secret = this.getStreamApiSecret();
+    const configured = Boolean(apiKey && secret);
+    const response: any = {
+      configured,
+      apiKeyPresent: Boolean(apiKey),
+      secretPresent: Boolean(secret),
+      apiKeyPreview: apiKey ? `${apiKey.slice(0, 4)}...${apiKey.slice(-4)}` : null,
+    };
+    if (!configured) return response;
+
+    try {
+      const serverToken = this.buildStreamUserToken('server', secret!, 60);
+      const health = await axios.get(
+        `https://video.stream-io-api.com/video/health?api_key=${apiKey}`,
+        {
+          headers: {
+            Authorization: `Bearer ${serverToken}`,
+            'stream-auth-type': 'jwt',
+          },
+          timeout: 8000,
+        },
+      );
+      response.health = health.data || { ok: true };
+    } catch (error: any) {
+      response.health = null;
+      response.error = error?.response?.data || error?.message || 'Unable to reach Stream API';
+    }
+
+    return response;
+  }
+
   @Post()
   async create(@Req() req: any, @Body() body: any) {
     let participantId: string | undefined;
@@ -182,7 +300,8 @@ export class VideoCallsController {
       status: 'RINGING',
       createdAt: new Date().toISOString(),
     });
-    return { success: true, sessionId: call.id, remoteVideoUrl: '', callData: call };
+    const dbCall = await this.persistCall(call);
+    return { success: true, sessionId: call.id, remoteVideoUrl: '', callData: dbCall || call };
   }
 
   @Post('consultation')
@@ -220,7 +339,7 @@ export class VideoCallsController {
   async token(@Req() req: any, @Body() body: any) {
     const channel = body.channel;
     if (!channel) throw new BadRequestException('channel is required');
-    const call = InMemoryStore.findById('videoCalls', String(channel)) as any;
+    const call = (await this.getCallById(String(channel))) as any;
     if (!call) {
       throw new BadRequestException('Invalid call channel');
     }
@@ -242,6 +361,7 @@ export class VideoCallsController {
     }
 
     if (streamApiKey && streamApiSecret) {
+      await this.ensureStreamUser(uid, req.user);
       const token = this.buildStreamUserToken(uid, streamApiSecret, expireSeconds);
       return {
         provider: 'stream',
@@ -268,12 +388,17 @@ export class VideoCallsController {
 
   @Post(':id/answer')
   async answer(@Req() req: any, @Param('id') id: string) {
-    const call = InMemoryStore.findById('videoCalls', id);
+    const call = await this.getCallById(id);
     if (!call) return { success: false };
     const updated = InMemoryStore.update('videoCalls', id, {
       status: 'ACTIVE',
       answeredBy: req.user?.userId,
       answeredAt: new Date().toISOString(),
+    });
+    const dbUpdated = await this.updateCall(id, {
+      status: 'ACTIVE',
+      answeredBy: req.user?.userId,
+      answeredAt: new Date(),
     });
     const callerId = call?.callerId;
     if (callerId && callerId !== req.user?.userId) {
@@ -289,17 +414,23 @@ export class VideoCallsController {
         },
       });
     }
-    return { success: true, callData: updated };
+    return { success: true, callData: updated || dbUpdated || call };
   }
 
   @Post(':id/end')
   async end(@Param('id') id: string, @Body() body: any) {
     const status = body?.status || 'ENDED';
-    const call = InMemoryStore.findById('videoCalls', id);
+    const call = await this.getCallById(id);
     const updated = InMemoryStore.update('videoCalls', id, {
       status,
       endedBy: body?.ended_by,
       duration: body?.duration,
+    });
+    await this.updateCall(id, {
+      status,
+      endedBy: body?.ended_by,
+      duration: body?.duration ? Number(body.duration) : null,
+      endedAt: new Date(),
     });
     if (call) {
       const endedBy = body?.ended_by;
@@ -330,37 +461,53 @@ export class VideoCallsController {
 
   @Post(':id/toggle-video')
   async toggleVideo(@Param('id') id: string, @Body() body: any) {
-    return InMemoryStore.update('videoCalls', id, { videoEnabled: body.enabled });
+    const updated = InMemoryStore.update('videoCalls', id, { videoEnabled: body.enabled });
+    await this.updateCall(id, { videoEnabled: Boolean(body.enabled) });
+    return updated;
   }
 
   @Post(':id/toggle-audio')
   async toggleAudio(@Param('id') id: string, @Body() body: any) {
-    return InMemoryStore.update('videoCalls', id, { audioEnabled: body.enabled });
+    const updated = InMemoryStore.update('videoCalls', id, { audioEnabled: body.enabled });
+    await this.updateCall(id, { audioEnabled: Boolean(body.enabled) });
+    return updated;
   }
 
   @Post(':id/toggle-camera')
   async toggleCamera(@Param('id') id: string, @Body() body: any) {
-    return InMemoryStore.update('videoCalls', id, { facing: body.facing });
+    const updated = InMemoryStore.update('videoCalls', id, { facing: body.facing });
+    await this.updateCall(id, { facing: body.facing });
+    return updated;
   }
 
   @Post(':id/hold')
   async hold(@Param('id') id: string, @Body() body: any) {
     const isOnHold = Boolean(body?.isOnHold);
-    return InMemoryStore.update('videoCalls', id, {
+    const updated = InMemoryStore.update('videoCalls', id, {
       isOnHold,
       status: isOnHold ? 'ON_HOLD' : 'ACTIVE',
       holdUpdatedAt: new Date().toISOString(),
     });
+    await this.updateCall(id, {
+      isOnHold,
+      status: isOnHold ? 'ON_HOLD' : 'ACTIVE',
+      holdUpdatedAt: new Date(),
+    });
+    return updated;
   }
 
   @Post(':id/start-recording')
   async startRecording(@Param('id') id: string) {
-    return InMemoryStore.update('videoCalls', id, { recording: true });
+    const updated = InMemoryStore.update('videoCalls', id, { recording: true });
+    await this.updateCall(id, { metadata: { recording: true } });
+    return updated;
   }
 
   @Post(':id/stop-recording')
   async stopRecording(@Param('id') id: string) {
-    return InMemoryStore.update('videoCalls', id, { recording: false });
+    const updated = InMemoryStore.update('videoCalls', id, { recording: false });
+    await this.updateCall(id, { metadata: { recording: false } });
+    return updated;
   }
 
   @Post(':id/upload-recording')
@@ -374,7 +521,23 @@ export class VideoCallsController {
   }
 
   @Get('history')
-  async history() {
+  async history(@Req() req: any) {
+    const role = req?.user?.role;
+    const userId = req?.user?.userId;
+    const where =
+      role === 'SUPER_ADMIN'
+        ? {}
+        : {
+            OR: [{ callerId: userId }, { participantId: userId }],
+          };
+    const calls = await this.prisma.videoCall.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+    });
+    if (calls.length) {
+      return { calls };
+    }
     return { calls: InMemoryStore.list('videoCalls') };
   }
 }

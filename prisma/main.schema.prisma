@@ -65,6 +65,8 @@ model User {
   receivedMessages  Message[]      @relation("MessageRecipient")
   patientRecords    MedicalRecord[] @relation("PatientRecords")
   medicRecords      MedicalRecord[] @relation("MedicRecords")
+  patientAppointments Appointment[] @relation("PatientAppointments")
+  medicAppointments   Appointment[] @relation("MedicAppointments")
   
   // Refresh Token for JWT
   hashedRefreshToken String?
@@ -130,6 +132,7 @@ model Tenant {
   users          TenantUser[]
   products       Product[]
   stockMovements StockMovement[]
+  hospitalServices HospitalService[]
 
   @@map("tenants")
 }
@@ -187,6 +190,22 @@ model StockMovement {
   @@index([pharmacyId, createdAt])
   @@index([productId, createdAt])
   @@map("stock_movements")
+}
+
+model HospitalService {
+  id          String   @id @default(uuid())
+  tenantId    String
+  name        String
+  description String?
+  category    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([name])
+  @@map("hospital_services")
 }
 
 model TenantUser {
@@ -280,6 +299,49 @@ model MedicalRecord {
   @@index([patientId])
   @@index([medicId])
   @@map("medical_records")
+}
+
+model Appointment {
+  id                String   @id @default(uuid())
+  patientId         String
+  medicId           String?
+  date              String?
+  time              String?
+  mode              String?  @default("video")
+  reason            String?
+  treatmentLocation String?
+  status            String   @default("pending")
+  fee               Decimal?
+  paymentId         String?
+  paidAt            DateTime?
+  cancelReason      String?
+  cancelledAt       DateTime?
+  cancelledBy       String?
+  rescheduleReason  String?
+  rescheduledFromDate String?
+  rescheduledFromTime String?
+  reminder24hSent   Boolean  @default(false)
+  reminder1hSent    Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  patient User  @relation("PatientAppointments", fields: [patientId], references: [id], onDelete: Cascade)
+  medic   User? @relation("MedicAppointments", fields: [medicId], references: [id], onDelete: SetNull)
+
+  @@index([patientId])
+  @@index([medicId])
+  @@map("appointments")
+}
+
+model InMemoryRecord {
+  id         String   @id @default(uuid())
+  collection String
+  data       Json
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([collection])
+  @@map("in_memory_records")
 }
 
 model Shift {
@@ -543,6 +605,37 @@ model Refund {
   @@index([disputeId, createdAt])
   @@index([paymentId, createdAt])
   @@map("refunds")
+}
+
+model VideoCall {
+  id            String   @id @default(uuid())
+  callerId      String
+  participantId String?
+  callerRole    String?
+  callType      String?
+  appointmentId String?
+  paymentId     String?
+  minutes       Int?
+  mode          String?
+  status        String   @default("RINGING")
+  answeredAt    DateTime?
+  endedAt       DateTime?
+  duration      Int?
+  answeredBy    String?
+  endedBy       String?
+  videoEnabled  Boolean?
+  audioEnabled  Boolean?
+  facing        String?
+  isOnHold      Boolean?
+  holdUpdatedAt DateTime?
+  metadata      Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([callerId, createdAt])
+  @@index([participantId, createdAt])
+  @@index([status, createdAt])
+  @@map("video_calls")
 }
 
 model PlatformHealthSnapshot {

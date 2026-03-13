@@ -109,7 +109,21 @@ export class AiLocalVoiceService {
     if (text.length > 2000) {
       throw new BadRequestException('Text too long for one TTS request (max 2000 chars).');
     }
-    return text;
+    return this.normalizeTtsText(text);
+  }
+
+  private normalizeTtsText(text: string) {
+    // Improve pronunciation for brand terms across the system.
+    return String(text)
+      .replace(/\bmedilink\b/gi, 'Medi link')
+      .trim();
+  }
+
+  private normalizeSpeed(value: unknown) {
+    if (value === undefined || value === null || value === '') return null;
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return null;
+    return Math.min(Math.max(numeric, 0.6), 1.4);
   }
 
   private ensureUploadDir(...parts: string[]) {
@@ -124,6 +138,10 @@ export class AiLocalVoiceService {
       throw new BadRequestException(
         'Local TTS is not configured. Set PIPER_MODEL in backend .env.',
       );
+    }
+    // Piper expects the .onnx file path; strip any accidental .json suffixes.
+    if (/\.onnx(\.json)+$/i.test(resolved)) {
+      return resolved.replace(/(\.json)+$/i, '');
     }
     return resolved;
   }
@@ -187,16 +205,29 @@ export class AiLocalVoiceService {
   async synthesize(payload: any) {
     const text = this.ensureText(payload?.text);
     const model = this.ensurePiperModel(payload?.model);
+    const speed = this.normalizeSpeed(payload?.speed);
     const outputDir = join(tmpdir(), 'medilink-ai-voice', 'tts');
     mkdirSync(outputDir, { recursive: true });
     const outputPath = join(outputDir, `${randomUUID()}.wav`);
 
     try {
       const args = ['--model', model, '--output_file', outputPath];
-      const result = await this.runProcess(this.piperBin, args, {
+      if (speed && speed !== 1) {
+        const lengthScale = (1 / speed).toFixed(3);
+        args.push('--length_scale', lengthScale);
+      }
+      let result = await this.runProcess(this.piperBin, args, {
         stdin: text,
         timeoutMs: 180000,
       });
+
+      if (result.code !== 0 && speed) {
+        // Retry without speed if the binary doesn't support the flag.
+        result = await this.runProcess(this.piperBin, ['--model', model, '--output_file', outputPath], {
+          stdin: text,
+          timeoutMs: 180000,
+        });
+      }
 
       if (result.code !== 0) {
         throw new Error(result.stderr || result.stdout || 'Piper exited with non-zero code.');
@@ -217,6 +248,7 @@ export class AiLocalVoiceService {
         mimeType: 'audio/wav',
         bytes: stat.size,
         audioBase64,
+        speed: speed || 1,
         generatedAt: new Date().toISOString(),
       };
     } catch (error: any) {

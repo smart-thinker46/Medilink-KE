@@ -1,9 +1,8 @@
-import { Controller, Get, Post, Body, UseGuards, Req, Query, BadRequestException, ForbiddenException } from '@nestjs/common';
+import { Controller, Get, Post, Body, UseGuards, Req, Query, BadRequestException, ForbiddenException, Param } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { InMemoryStore } from 'src/common/in-memory.store';
 import { PrismaService } from 'src/database/prisma.service';
 import { mergeProfileExtras } from 'src/common/profile-extras';
-import { MpesaService } from './mpesa.service';
 import { EmailsService } from '../emails/emails.service';
 import { ConfigService } from '@nestjs/config';
 import { IntaSendService } from './intasend.service';
@@ -12,7 +11,6 @@ import { IntaSendService } from './intasend.service';
 @UseGuards(AuthGuard('jwt'))
 export class PaymentsController {
   constructor(
-    private mpesa: MpesaService,
     private intasend: IntaSendService,
     private config: ConfigService,
     private emails: EmailsService,
@@ -157,6 +155,32 @@ export class PaymentsController {
     throw new ForbiddenException('Wallet is available only for medic and facility accounts.');
   }
 
+  private findPaymentByReference(reference: string) {
+    const ref = String(reference || '').trim();
+    if (!ref) return null;
+    const payments = InMemoryStore.list('payments') as any[];
+    return (
+      payments.find((item) => item?.id === ref) ||
+      payments.find((item) => item?.apiRef === ref) ||
+      payments.find((item) => item?.receiptNumber === ref) ||
+      null
+    );
+  }
+
+  private assertPaymentAccess(req: any, payment: any) {
+    if (!payment) {
+      throw new BadRequestException('Payment not found.');
+    }
+    const role = String(req?.user?.role || '').toUpperCase();
+    const userId = String(req?.user?.userId || '').trim();
+    if (role === 'SUPER_ADMIN') return;
+    if (!userId) {
+      throw new ForbiddenException('Unauthenticated request.');
+    }
+    if (payment.userId === userId || payment.recipientId === userId) return;
+    throw new ForbiddenException('You cannot access this payment.');
+  }
+
   private buildWalletSnapshot(ownerId: string) {
     const payments = (InMemoryStore.list('payments') as any[])
       .filter((item) => String(item?.recipientId || '') === ownerId)
@@ -220,22 +244,112 @@ export class PaymentsController {
     };
   }
 
-  @Post()
-  async create(@Req() req: any, @Body() body: any) {
-    const isVideoCall = body.type === 'VIDEO_CALL';
+  private findPaymentRequestById(requestId?: string | null) {
+    const ref = String(requestId || '').trim();
+    if (!ref) return null;
+    const requests = (InMemoryStore.list('payment_requests') as any[]) || [];
+    return requests.find((item) => String(item?.id || '') === ref) || null;
+  }
+
+  @Post('requests')
+  async createPaymentRequest(@Req() req: any, @Body() body: any) {
+    const role = String(req.user?.role || '').toUpperCase();
+    const allowed = role === 'MEDIC' || role === 'HOSPITAL_ADMIN' || role === 'SUPER_ADMIN';
+    if (!allowed) {
+      throw new ForbiddenException('Only providers can request additional charges.');
+    }
+    const patientId = String(body.patientId || body.userId || '').trim();
+    if (!patientId) {
+      throw new BadRequestException('patientId is required.');
+    }
     const amount = Number(body.amount || 0);
     if (!Number.isFinite(amount) || amount <= 0) {
       throw new BadRequestException('amount must be a positive number');
     }
     const now = new Date().toISOString();
+    const currency = this.normalizeCurrency(body.currency);
+    const description = String(body.description || 'Additional charges').trim();
+    const request = InMemoryStore.create('payment_requests', {
+      patientId,
+      medicId: req.user?.userId || null,
+      requestedBy: req.user?.userId || null,
+      requesterRole: role,
+      amount,
+      currency,
+      description,
+      status: 'REQUESTED',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const title = 'Payment Request';
+    const message = `${req.user?.fullName || 'Medic'} requested KES ${amount.toLocaleString()} for additional charges.`;
+    InMemoryStore.create('notifications', {
+      userId: patientId,
+      title,
+      message,
+      type: 'PAYMENT_REQUEST',
+      relatedId: request.id,
+      data: {
+        requestId: request.id,
+        amount,
+        currency,
+        medicId: req.user?.userId || null,
+        description,
+      },
+      isRead: false,
+      createdAt: now,
+    });
+
+    return { success: true, request };
+  }
+
+  @Post()
+  async create(@Req() req: any, @Body() body: any) {
+    const requestedMethod = body?.method ? String(body.method).trim().toLowerCase() : '';
+    if (requestedMethod && requestedMethod !== 'intasend') {
+      throw new BadRequestException('Only IntaSend payments are supported.');
+    }
+    const isVideoCall = body.type === 'VIDEO_CALL';
+    const appointmentId = body.appointmentId ? String(body.appointmentId).trim() : null;
+    const requestId = body.requestId ? String(body.requestId).trim() : null;
+    const amount = Number(body.amount || 0);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestException('amount must be a positive number');
+    }
+    let recipientId = body.recipientId;
+    let recipientRole = body.recipientRole;
+    if (!recipientId && appointmentId && String(body.type || '').toUpperCase() === 'APPOINTMENT') {
+      const appointment = await this.prisma.appointment
+        .findUnique({ where: { id: appointmentId }, select: { medicId: true } })
+        .catch(() => null);
+      if (appointment?.medicId) {
+        recipientId = appointment.medicId;
+        recipientRole = 'MEDIC';
+      }
+    }
+    if (!recipientId && requestId) {
+      const request = this.findPaymentRequestById(requestId);
+      if (request?.medicId) {
+        recipientId = request.medicId;
+        recipientRole = recipientRole || 'MEDIC';
+      }
+    }
+
+    const now = new Date().toISOString();
     const receiptNumber = `MLK-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const payerRole = String(req.user?.role || '').toUpperCase();
     const description =
       body.description ||
       (body.type === 'SUBSCRIPTION'
-        ? 'Subscription'
-        : isVideoCall
-          ? 'Video Call'
-          : 'Payment');
+        ? payerRole === 'PATIENT'
+          ? 'AI Subscription'
+          : 'Subscription'
+        : body.type === 'APPOINTMENT'
+          ? 'Appointment Booking'
+          : isVideoCall
+            ? 'Video Call'
+            : 'Payment');
     const currency = this.normalizeCurrency(body.currency);
     const payment = InMemoryStore.create('payments', {
       userId: req.user?.userId,
@@ -247,9 +361,11 @@ export class PaymentsController {
       type: body.type || 'PAYMENT',
       description,
       plan: body.plan,
-      recipientId: body.recipientId,
-      recipientRole: body.recipientRole,
+      recipientId,
+      recipientRole,
       orderId: body.orderId,
+      appointmentId,
+      requestId,
       // Never trust client-provided payment status.
       status: 'PENDING',
       minutes: body.minutes,
@@ -263,6 +379,14 @@ export class PaymentsController {
       payment.status = 'PAID';
       payment.updatedAt = new Date().toISOString();
       await this.sendPaymentNotifications(payment);
+      if (payment.requestId) {
+        InMemoryStore.update('payment_requests', payment.requestId, {
+          status: 'PAID',
+          paidAt: new Date().toISOString(),
+          paymentId: payment.id,
+          updatedAt: new Date().toISOString(),
+        });
+      }
       if (payment.type === 'SUBSCRIPTION') {
         InMemoryStore.create('subscriptions', {
           userId: payment.userId,
@@ -285,6 +409,12 @@ export class PaymentsController {
           updatedAt: new Date().toISOString(),
         });
         this.emitCheckoutCompleteEvent(updatedOrder, payment);
+      }
+      if (payment.type === 'APPOINTMENT' && payment.appointmentId) {
+        await this.prisma.appointment.update({
+          where: { id: payment.appointmentId },
+          data: { paymentId: payment.id, paidAt: new Date() },
+        });
       }
       return payment;
     }
@@ -321,106 +451,6 @@ export class PaymentsController {
     return payment;
   }
 
-  @Post('mpesa/stk-push')
-  async stkPush(@Req() req: any, @Body() body: any) {
-    const now = new Date().toISOString();
-    const receiptNumber = `MLK-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
-    const description = body.description || 'M-Pesa Payment';
-    const currency = this.normalizeCurrency(body.currency);
-    const usdKesRate = this.getUsdKesRate();
-    const originalAmount = Number(body.amount || 0);
-    if (!originalAmount || originalAmount <= 0) {
-      throw new BadRequestException('amount is required');
-    }
-    const amountKes = currency === 'USD' ? Math.ceil(originalAmount * usdKesRate) : originalAmount;
-    const payment = InMemoryStore.create('payments', {
-      userId: req.user?.userId,
-      payerEmail: req.user?.email,
-      payerRole: req.user?.role,
-      amount: originalAmount,
-      currency,
-      chargedAmount: amountKes,
-      chargedCurrency: 'KES',
-      fxRate: currency === 'USD' ? usdKesRate : null,
-      method: 'mpesa',
-      type: body.type || 'PAYMENT',
-      description,
-      plan: body.plan,
-      recipientId: body.recipientId,
-      recipientRole: body.recipientRole,
-      orderId: body.orderId,
-      status: 'PENDING',
-      minutes: body.minutes,
-      receiptNumber,
-      invoiceNumber: receiptNumber,
-      receiptIssuedAt: now,
-      createdAt: now,
-    });
-
-    const requesterId = req.user?.userId as string | undefined;
-    const requester =
-      !body.phone && requesterId
-        ? await this.prisma.user.findUnique({
-            where: { id: requesterId },
-            select: { phone: true },
-          })
-        : null;
-    const phone = body.phone || requester?.phone;
-    if (!phone) {
-      throw new BadRequestException(
-        'Phone number is required for M-Pesa STK push. Provide phone in request body or update your profile phone.',
-      );
-    }
-
-    const response = await this.mpesa.stkPush({
-      amount: amountKes,
-      phone,
-      accountReference: body.accountReference || receiptNumber,
-      description,
-      callbackUrl: body.callbackUrl,
-    });
-
-    payment.checkoutRequestId = response?.CheckoutRequestID;
-    payment.merchantRequestId = response?.MerchantRequestID;
-    payment.mpesaResponse = response;
-
-    if (String(response?.ResponseCode) === '0' && this.mpesa.sandboxMode) {
-      payment.status = 'PAID';
-      payment.mpesaReceiptNumber = `SANDBOX-${Math.random().toString(36).slice(2, 10)}`;
-      payment.mpesaResultDesc = 'Sandbox: paid';
-      payment.updatedAt = new Date().toISOString();
-      await this.sendPaymentNotifications(payment);
-      if (payment.type === 'SUBSCRIPTION') {
-        InMemoryStore.create('subscriptions', {
-          userId: payment.userId,
-          role: payment.payerRole,
-          plan: payment.plan || 'monthly',
-          amount: payment.amount,
-          currency: payment.currency,
-          status: 'ACTIVE',
-          startedAt: new Date().toISOString(),
-        });
-        await mergeProfileExtras(this.prisma, payment.userId, {
-          subscriptionActive: true,
-          premiumActive: true,
-        });
-      }
-      if (payment.type === 'ORDER' && payment.orderId) {
-        const updatedOrder = InMemoryStore.update('orders', payment.orderId, {
-          status: 'PAID',
-          paymentId: payment.id,
-          updatedAt: new Date().toISOString(),
-        });
-        this.emitCheckoutCompleteEvent(updatedOrder, payment);
-      }
-    }
-
-    return {
-      payment,
-      mpesa: response,
-    };
-  }
-
   @Get('history')
   async history(
     @Req() req: any,
@@ -428,6 +458,9 @@ export class PaymentsController {
     @Query('end') end?: string,
     @Query('type') type?: string,
     @Query('status') status?: string,
+    @Query('search') search?: string,
+    @Query('payerRole') payerRole?: string,
+    @Query('recipientRole') recipientRole?: string,
   ) {
     const role = req.user?.role;
     const userId = req.user?.userId;
@@ -445,6 +478,36 @@ export class PaymentsController {
         (item) => String(item.status || '').toUpperCase() === String(status).toUpperCase(),
       );
     }
+    if (payerRole) {
+      list = list.filter(
+        (item) => String(item.payerRole || '').toUpperCase() === String(payerRole).toUpperCase(),
+      );
+    }
+    if (recipientRole) {
+      list = list.filter(
+        (item) => String(item.recipientRole || '').toUpperCase() === String(recipientRole).toUpperCase(),
+      );
+    }
+    if (search) {
+      const term = String(search || '').trim().toLowerCase();
+      if (term) {
+        list = list.filter((item) => {
+          const haystack = [
+            item.payerEmail,
+            item.userId,
+            item.recipientId,
+            item.recipientRole,
+            item.payerRole,
+            item.description,
+            item.type,
+          ]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase();
+          return haystack.includes(term);
+        });
+      }
+    }
     if (start || end) {
       const startDate = start ? new Date(start) : null;
       const endDate = end ? new Date(end) : null;
@@ -456,6 +519,24 @@ export class PaymentsController {
       });
     }
     return list;
+  }
+
+  @Get('lookup')
+  async lookup(@Req() req: any, @Query('apiRef') apiRef?: string, @Query('paymentId') paymentId?: string) {
+    const reference = String(apiRef || paymentId || '').trim();
+    if (!reference) {
+      throw new BadRequestException('apiRef or paymentId is required.');
+    }
+    const payment = this.findPaymentByReference(reference);
+    this.assertPaymentAccess(req, payment);
+    return payment;
+  }
+
+  @Get(':id')
+  async getPayment(@Req() req: any, @Param('id') id: string) {
+    const payment = this.findPaymentByReference(id);
+    this.assertPaymentAccess(req, payment);
+    return payment;
   }
 
   @Get('wallet')
@@ -538,100 +619,12 @@ export class PaymentsController {
     };
   }
 
-  @Post('mpesa/query')
-  async queryMpesa(@Req() req: any, @Body() body: any) {
-    const checkoutRequestId = body.checkoutRequestId || body.checkout_request_id;
-    if (!checkoutRequestId) {
-      throw new BadRequestException('checkoutRequestId is required');
+  @Get('intasend/status')
+  async intasendStatus(@Req() req: any) {
+    if (req?.user?.role !== 'SUPER_ADMIN') {
+      throw new ForbiddenException('Only super admins can view IntaSend status.');
     }
-    const response = await this.mpesa.stkQuery(checkoutRequestId);
-    const payments = InMemoryStore.list('payments');
-    const payment = payments.find((p) => p.checkoutRequestId === checkoutRequestId);
-    if (
-      payment &&
-      req.user?.role !== 'SUPER_ADMIN' &&
-      payment.userId !== req.user?.userId
-    ) {
-      throw new ForbiddenException('You cannot query this payment');
-    }
-    if (payment && String(response?.ResultCode) === '0') {
-      payment.status = 'PAID';
-      payment.mpesaResultDesc = response?.ResultDesc || payment.mpesaResultDesc;
-      payment.updatedAt = new Date().toISOString();
-      await this.sendPaymentNotifications(payment);
-      if (payment.type === 'SUBSCRIPTION') {
-        InMemoryStore.create('subscriptions', {
-          userId: payment.userId,
-          role: payment.payerRole,
-          plan: payment.plan || 'monthly',
-          amount: payment.amount,
-          currency: payment.currency,
-          status: 'ACTIVE',
-          startedAt: new Date().toISOString(),
-        });
-        await mergeProfileExtras(this.prisma, payment.userId, {
-          subscriptionActive: true,
-          premiumActive: true,
-        });
-      }
-      if (payment.type === 'ORDER' && payment.orderId) {
-        const updatedOrder = InMemoryStore.update('orders', payment.orderId, {
-          status: 'PAID',
-          paymentId: payment.id,
-          updatedAt: new Date().toISOString(),
-        });
-        this.emitCheckoutCompleteEvent(updatedOrder, payment);
-      }
-    }
-    return { mpesa: response, payment };
+    return this.intasend.getStatus();
   }
 
-  @Post('mpesa/reconcile')
-  async reconcileMpesa(@Req() req: any) {
-    if (req.user?.role !== 'SUPER_ADMIN') {
-      throw new ForbiddenException('Only admin can run reconciliation');
-    }
-    const payments = InMemoryStore.list('payments').filter(
-      (p) => p.method === 'mpesa' && p.status === 'PENDING' && p.checkoutRequestId,
-    );
-    const results: Array<{ id: string; response?: unknown; error?: string }> = [];
-    for (const payment of payments) {
-      try {
-        const response = await this.mpesa.stkQuery(payment.checkoutRequestId);
-        if (String(response?.ResultCode) === '0') {
-          payment.status = 'PAID';
-          payment.mpesaResultDesc = response?.ResultDesc || payment.mpesaResultDesc;
-          payment.updatedAt = new Date().toISOString();
-          await this.sendPaymentNotifications(payment);
-          if (payment.type === 'SUBSCRIPTION') {
-            InMemoryStore.create('subscriptions', {
-              userId: payment.userId,
-              role: payment.payerRole,
-              plan: payment.plan || 'monthly',
-              amount: payment.amount,
-              currency: payment.currency,
-              status: 'ACTIVE',
-              startedAt: new Date().toISOString(),
-            });
-            await mergeProfileExtras(this.prisma, payment.userId, {
-              subscriptionActive: true,
-              premiumActive: true,
-            });
-          }
-          if (payment.type === 'ORDER' && payment.orderId) {
-            const updatedOrder = InMemoryStore.update('orders', payment.orderId, {
-              status: 'PAID',
-              paymentId: payment.id,
-              updatedAt: new Date().toISOString(),
-            });
-            this.emitCheckoutCompleteEvent(updatedOrder, payment);
-          }
-        }
-        results.push({ id: payment.id, response });
-      } catch (error) {
-        results.push({ id: payment.id, error: error.message || 'Query failed' });
-      }
-    }
-    return { count: results.length, results };
-  }
 }

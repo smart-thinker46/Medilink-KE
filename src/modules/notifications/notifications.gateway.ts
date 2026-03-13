@@ -28,6 +28,8 @@ export class NotificationsGateway {
 
   private readonly socketToUser = new Map<string, string>();
   private readonly userToSockets = new Map<string, Set<string>>();
+  private readonly userLastSeen = new Map<string, string>();
+  private readonly userOnlineSince = new Map<string, string>();
 
   private normalizeUserId(userId: unknown) {
     if (userId === null || userId === undefined) return null;
@@ -39,6 +41,23 @@ export class NotificationsGateway {
     return Array.from(this.userToSockets.entries())
       .filter(([, sockets]) => sockets.size > 0)
       .map(([userId]) => userId);
+  }
+
+  listOnlineUserIds() {
+    return this.getOnlineUserIds();
+  }
+
+  getPresenceMeta(userId: string) {
+    const id = this.normalizeUserId(userId);
+    if (!id) {
+      return { isOnline: false, onlineSince: null, lastSeenAt: null };
+    }
+    const isOnline = this.isUserOnline(id);
+    return {
+      isOnline,
+      onlineSince: isOnline ? this.userOnlineSince.get(id) || null : null,
+      lastSeenAt: this.userLastSeen.get(id) || null,
+    };
   }
 
   private markOnline(userId: string, socketId: string) {
@@ -62,6 +81,8 @@ export class NotificationsGateway {
     this.socketToUser.set(socketId, userId);
 
     if (wasOffline) {
+      const now = new Date().toISOString();
+      this.userOnlineSince.set(userId, now);
       this.server?.emit('user_online', { userId, isOnline: true, status: 'online' });
       this.server?.emit('presence_update', { userId, isOnline: true, status: 'online' });
     }
@@ -76,7 +97,10 @@ export class NotificationsGateway {
 
     sockets.delete(socketId);
     if (sockets.size === 0) {
+      const now = new Date().toISOString();
       this.userToSockets.delete(userId);
+      this.userLastSeen.set(userId, now);
+      this.userOnlineSince.delete(userId);
       this.server?.emit('user_offline', { userId, isOnline: false, status: 'offline' });
       this.server?.emit('presence_update', { userId, isOnline: false, status: 'offline' });
     }

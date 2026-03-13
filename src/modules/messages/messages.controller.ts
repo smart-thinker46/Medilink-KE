@@ -31,10 +31,43 @@ export class MessagesController {
     private notificationsGateway: NotificationsGateway,
   ) {}
 
+  private async hasPatientMedicAppointment(patientId: string, medicId: string) {
+    const appointment = await this.prisma.appointment.findFirst({
+      where: { patientId, medicId },
+      select: { id: true },
+    });
+    return Boolean(appointment);
+  }
+
+  private async assertPatientMedicChatAllowed(currentUserId: string, otherUserId: string) {
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: [currentUserId, otherUserId] } },
+      select: { id: true, role: true },
+    });
+    const map = new Map(users.map((user) => [user.id, user.role]));
+    const currentRole = map.get(currentUserId);
+    const otherRole = map.get(otherUserId);
+    if (!currentRole || !otherRole) return;
+
+    const currentIsPatient = currentRole === UserRole.PATIENT;
+    const currentIsMedic = currentRole === UserRole.MEDIC;
+    const otherIsPatient = otherRole === UserRole.PATIENT;
+    const otherIsMedic = otherRole === UserRole.MEDIC;
+
+    if ((currentIsPatient && otherIsMedic) || (currentIsMedic && otherIsPatient)) {
+      const patientId = currentIsPatient ? currentUserId : otherUserId;
+      const medicId = currentIsMedic ? currentUserId : otherUserId;
+      if (!(await this.hasPatientMedicAppointment(patientId, medicId))) {
+        throw new ForbiddenException('Chat is only available after booking an appointment.');
+      }
+    }
+  }
+
   @Get('thread')
   async thread(@Req() req: any, @Query('userId') userId: string) {
     const currentUserId = req.user?.userId;
     if (!currentUserId || !userId) return [];
+    await this.assertPatientMedicChatAllowed(String(currentUserId), String(userId));
     const pendingDelivery = await this.prisma.message.findMany({
       where: {
         senderId: userId,
@@ -175,9 +208,14 @@ export class MessagesController {
       where: { id: recipientId },
       select: { id: true, role: true },
     });
+    const sender = await this.prisma.user.findUnique({
+      where: { id: senderId },
+      select: { id: true, fullName: true, email: true },
+    });
     if (!recipient) {
       throw new BadRequestException('recipientId is invalid');
     }
+    await this.assertPatientMedicChatAllowed(String(senderId), String(recipientId));
     assertCanCommunicate(senderRole, recipient.role, 'Chat');
     const message = await this.prisma.message.create({
       data: {
@@ -200,18 +238,25 @@ export class MessagesController {
     }
     this.messagesGateway.emitToUsers([senderId, recipientId], updated);
 
+    const notificationData = {
+      senderId,
+      senderName: sender?.fullName || sender?.email || null,
+    };
     const notification = InMemoryStore.create('notifications', {
       userId: recipientId,
       title: 'New message',
       message: body.text ? String(body.text).slice(0, 160) : 'You have a new message.',
       type: 'CHAT',
       relatedId: updated.id,
+      data: notificationData,
       isRead: false,
       createdAt: new Date().toISOString(),
     });
     this.notificationsGateway.emitToUser(recipientId, {
       title: notification.title,
       message: notification.message,
+      type: notification.type,
+      data: notificationData,
     });
     return updated;
   }

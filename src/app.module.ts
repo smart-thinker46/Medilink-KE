@@ -24,6 +24,7 @@ import { ComplaintsModule } from './modules/complaints/complaints.module';
 import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
 import { MessagesModule } from './modules/messages/messages.module';
 import { AiModule } from './modules/ai/ai.module';
+import { HospitalServicesModule } from './modules/hospital-services/hospital-services.module';
 import { BullModule } from '@nestjs/bullmq';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
@@ -135,6 +136,7 @@ import { SubscriptionAccessInterceptor } from './common/subscription-access.inte
     SubscriptionsModule,
     MessagesModule,
     AiModule,
+    HospitalServicesModule,
   ],
   controllers: [AppController],
   providers: [

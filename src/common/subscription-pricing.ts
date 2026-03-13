@@ -7,7 +7,7 @@ export const DEFAULT_SUBSCRIPTION_PRICING: Record<
   MEDIC: { monthly: 300, yearly: 4800 },
   PHARMACY_ADMIN: { monthly: 500, yearly: 10000 },
   HOSPITAL_ADMIN: { monthly: 1000, yearly: 12000 },
-  PATIENT: { monthly: 0, yearly: 0 },
+  PATIENT: { monthly: 100, yearly: 1200 },
 };
 
 const SUPPORTED_PRICING_ROLES = Object.keys(DEFAULT_SUBSCRIPTION_PRICING);
@@ -59,6 +59,19 @@ export async function getSubscriptionPricingPersistent(prisma: PrismaService) {
     });
     const seeded = await db.subscriptionPricing.findMany();
     return buildSubscriptionPricingMap(seeded);
+  }
+  const patientDefaults = DEFAULT_SUBSCRIPTION_PRICING.PATIENT;
+  const patientRow = rows.find((row) => String(row?.role || '').toUpperCase() === 'PATIENT');
+  if (patientRow && (Number(patientRow.monthly) <= 0 || Number(patientRow.yearly) <= 0)) {
+    await db.subscriptionPricing.update({
+      where: { role: 'PATIENT' },
+      data: {
+        monthly: patientDefaults.monthly,
+        yearly: patientDefaults.yearly,
+      },
+    });
+    const refreshed = await db.subscriptionPricing.findMany();
+    return buildSubscriptionPricingMap(refreshed);
   }
   return buildSubscriptionPricingMap(rows);
 }

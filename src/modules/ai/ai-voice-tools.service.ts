@@ -10,6 +10,21 @@ type VoiceContext = {
   role: string;
 };
 
+const DRUG_SYNONYMS: Array<{ generic: string; aliases: string[] }> = [
+  { generic: 'paracetamol', aliases: ['paracetamol', 'panadol', 'tylenol', 'calpol', 'acetaminophen'] },
+  { generic: 'cetirizine', aliases: ['cetirizine', 'cetrizine', 'centrizine', 'zyrtec'] },
+  { generic: 'ibuprofen', aliases: ['ibuprofen', 'brufen', 'advil', 'nurofen'] },
+  { generic: 'amoxicillin', aliases: ['amoxicillin', 'amoxil'] },
+  { generic: 'amoxicillin clavulanate', aliases: ['augmentin', 'amoxiclav', 'co-amoxiclav'] },
+  { generic: 'metronidazole', aliases: ['metronidazole', 'flagyl'] },
+  { generic: 'omeprazole', aliases: ['omeprazole', 'losec', 'prilosec'] },
+  { generic: 'azithromycin', aliases: ['azithromycin', 'zithromax'] },
+  { generic: 'loratadine', aliases: ['loratadine', 'claritin'] },
+  { generic: 'salbutamol', aliases: ['salbutamol', 'albuterol', 'ventolin'] },
+  { generic: 'insulin', aliases: ['insulin', 'humulin', 'novolin'] },
+  { generic: 'artemether lumefantrine', aliases: ['coartem', 'artemether lumefantrine'] },
+];
+
 @Injectable()
 export class AiVoiceToolsService {
   constructor(
@@ -60,6 +75,26 @@ export class AiVoiceToolsService {
     return null;
   }
 
+  private expandDrugTerms(raw: string) {
+    const terms = new Set<string>();
+    const text = String(raw || '').toLowerCase();
+    if (!text) return terms;
+    const cleaned = text.replace(/[^a-z0-9\s]/g, ' ');
+    cleaned
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length > 2)
+      .forEach((token) => terms.add(token));
+
+    DRUG_SYNONYMS.forEach((entry) => {
+      const hit = entry.aliases.some((alias) => text.includes(alias));
+      if (!hit) return;
+      terms.add(entry.generic);
+      entry.aliases.forEach((alias) => terms.add(alias));
+    });
+    return terms;
+  }
+
   async searchMedics(args: any) {
     const result = await this.aiService.smartSearch(
       {
@@ -88,7 +123,41 @@ export class AiVoiceToolsService {
       select: { id: true, fullName: true, email: true, phone: true },
       take: 500,
     });
-    const extrasMap = await getProfileExtrasMap(this.prisma, users.map((u) => u.id));
+    const userIds = users.map((u) => u.id);
+    const [extrasMap, tenantLinks] = await Promise.all([
+      getProfileExtrasMap(this.prisma, userIds),
+      this.prisma.tenantUser.findMany({
+        where: {
+          userId: { in: userIds },
+          tenant: { type: 'HOSPITAL' },
+        },
+        select: { userId: true, tenantId: true, isPrimary: true },
+      }),
+    ]);
+    const tenantByUser = new Map<string, string>();
+    tenantLinks.forEach((link) => {
+      if (!link.userId || !link.tenantId) return;
+      const current = tenantByUser.get(link.userId);
+      if (!current || link.isPrimary) {
+        tenantByUser.set(link.userId, link.tenantId);
+      }
+    });
+    const tenantIds = Array.from(new Set(tenantLinks.map((link) => link.tenantId).filter(Boolean)));
+    const db = this.prisma as any;
+    const serviceRows = tenantIds.length
+      ? await db.hospitalService.findMany({
+          where: { tenantId: { in: tenantIds } },
+          select: { tenantId: true, name: true },
+        })
+      : [];
+    const servicesByTenant = new Map<string, string[]>();
+    serviceRows.forEach((row) => {
+      const key = String(row.tenantId || '');
+      if (!key) return;
+      const list = servicesByTenant.get(key) || [];
+      if (row.name) list.push(String(row.name));
+      servicesByTenant.set(key, list);
+    });
     const query = String(
       [args?.name, args?.location, ...(Array.isArray(args?.services) ? args.services : [])]
         .filter(Boolean)
@@ -99,13 +168,17 @@ export class AiVoiceToolsService {
 
     let items = users.map((u) => {
       const extras = extrasMap.get(u.id) || {};
+      const tenantId = tenantByUser.get(u.id) || '';
+      const hospitalServices = tenantId ? servicesByTenant.get(tenantId) || [] : [];
+      const legacyServices = extras.services || extras.specialties || null;
+      const services = hospitalServices.length ? hospitalServices : legacyServices;
       return {
         id: u.id,
         name: extras.hospitalName || u.fullName || u.email || 'Hospital',
         email: u.email,
         phone: u.phone || extras.adminContact || null,
         location: extras.locationAddress || extras.locationTown || extras.county || null,
-        services: extras.services || extras.specialties || null,
+        services,
       };
     });
 
@@ -119,11 +192,101 @@ export class AiVoiceToolsService {
   }
 
   async searchPharmacyProducts(args: any) {
+    const rawProduct = String(args?.productName || '').trim();
+    const rawLocation = String(args?.location || '').trim();
+    const stopwords = new Set([
+      'find',
+      'search',
+      'nearest',
+      'closest',
+      'near',
+      'nearby',
+      'around',
+      'within',
+      'at',
+      'in',
+      'from',
+      'to',
+      'me',
+      'my',
+      'tafuta',
+      'nitafutie',
+      'karibu',
+      'karibu na',
+      'kwenye',
+      'katika',
+      'kutoka',
+      'mimi',
+      'angu',
+      'sell',
+      'selling',
+      'stock',
+      'stocks',
+      'have',
+      'has',
+      'having',
+      'available',
+      'dawa',
+      'duka',
+      'famasia',
+      'hospitali',
+      'kliniki',
+      'daktari',
+      'muuguzi',
+      'mtaalamu',
+      'tabibu',
+      'mganga',
+      'watoto',
+      'moyo',
+      'akili',
+      'meno',
+      'macho',
+      'masikio',
+      'pua',
+      'koo',
+      'mifupa',
+      'upasuaji',
+      'figo',
+      'ini',
+      'damu',
+      'kisukari',
+      'shinikizo',
+      'uzazi',
+      'majeraha',
+      'saratani',
+      'neva',
+      'ndani',
+      'ngozi',
+      'pharmacy',
+      'chemist',
+      'drugstore',
+      'pharmacist',
+      'medicine',
+      'medication',
+      'drug',
+      'tablet',
+      'pill',
+      'capsule',
+      'syrup',
+    ]);
+    const expandedTerms = Array.from(this.expandDrugTerms(rawProduct));
+    const uniqueTokens = expandedTerms.filter(
+      (token) => token.length > 2 && !stopwords.has(token),
+    );
+    const orFilters: Array<Record<string, any>> = [];
+    if (rawProduct) {
+      orFilters.push({ name: { contains: rawProduct, mode: 'insensitive' } });
+      orFilters.push({ productName: { contains: rawProduct, mode: 'insensitive' } });
+    }
+    uniqueTokens.forEach((token) => {
+      orFilters.push({ name: { contains: token, mode: 'insensitive' } });
+      orFilters.push({ productName: { contains: token, mode: 'insensitive' } });
+    });
+    const where = orFilters.length ? { OR: orFilters } : {};
+
     const products = await (this.prisma as any).product.findMany({
       where: {
-        ...(args?.productName
-          ? { name: { contains: String(args.productName), mode: 'insensitive' } }
-          : {}),
+        ...where,
       },
       orderBy: { createdAt: 'desc' },
       take: 200,
@@ -173,7 +336,88 @@ export class AiVoiceToolsService {
       });
     });
 
-    const locationQuery = String(args?.location || '').trim().toLowerCase();
+    const locationTerms = new Set<string>();
+    const locationRegex = /\b(?:in|from|near|around|within|at|katika|kwenye|kutoka|karibu na|eneo la|jirani na)\s+([a-z\s]{2,40})/gi;
+    let match = locationRegex.exec(rawLocation.toLowerCase());
+    while (match) {
+      const phrase = String(match[1] || '')
+        .trim()
+        .replace(/[^a-z\s]/g, ' ');
+      phrase
+        .split(/\s+/)
+        .map((part) => part.trim())
+        .filter((part) => part.length > 2)
+        .forEach((part) => locationTerms.add(part));
+      match = locationRegex.exec(rawLocation.toLowerCase());
+    }
+    const commonLocations = [
+      'nairobi',
+      'mombasa',
+      'kisumu',
+      'nakuru',
+      'eldoret',
+      'thika',
+      'naivasha',
+      'nanyuki',
+      'malindi',
+      'ukunda',
+      'ruiru',
+      'kikuyu',
+      'kitale',
+      'kakamega',
+      'kericho',
+      'nyahururu',
+      'migori',
+      'garissa',
+      'isiolo',
+      'marsabit',
+      'lamu',
+      'kilifi',
+      'kwale',
+      'narok',
+      'embu',
+      'meru',
+      'nyeri',
+      'muranga',
+      'kirinyaga',
+      'nyandarua',
+      'laikipia',
+      'kajiado',
+      'machakos',
+      'makueni',
+      'kitui',
+      'bungoma',
+      'busia',
+      'siaya',
+      'homabay',
+      'homa',
+      'homa bay',
+      'kisii',
+      'nyamira',
+      'taita',
+      'taveta',
+      'taita taveta',
+      'tana river',
+      'tharaka',
+      'tharaka nithi',
+      'trans nzoia',
+      'uasin gishu',
+      'nandi',
+      'bomet',
+      'baringo',
+      'elgeyo',
+      'marakwet',
+      'elgeyo marakwet',
+      'samburu',
+      'turkana',
+      'west pokot',
+      'wajir',
+      'mandera',
+    ];
+    commonLocations.forEach((loc) => {
+      if (rawLocation.toLowerCase().includes(loc)) locationTerms.add(loc);
+    });
+    const locationQuery = Array.from(locationTerms);
     const maxPrice = this.toNum(args?.maxPrice, 0);
 
     const mapped = products
@@ -193,11 +437,11 @@ export class AiVoiceToolsService {
         };
       })
       .filter((item) => (maxPrice > 0 ? item.price <= maxPrice : true))
-      .filter((item) =>
-        locationQuery
-          ? String(item.pharmacy?.location || '').toLowerCase().includes(locationQuery)
-          : true,
-      );
+      .filter((item) => {
+        if (!locationQuery.length) return true;
+        const loc = String(item.pharmacy?.location || '').toLowerCase();
+        return locationQuery.some((term) => loc.includes(term));
+      });
 
     return mapped.slice(0, 30);
   }
