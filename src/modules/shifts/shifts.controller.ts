@@ -44,6 +44,195 @@ export class ShiftsController {
     return Number.isFinite(parsed) ? parsed : fallback;
   }
 
+  private parseBoolean(value: any, fallback = false) {
+    if (value === true || value === 'true' || value === 1 || value === '1') return true;
+    if (value === false || value === 'false' || value === 0 || value === '0') return false;
+    return fallback;
+  }
+
+  private parseList(value: any) {
+    if (Array.isArray(value)) return value.filter(Boolean);
+    if (typeof value === 'string') {
+      return value
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+    return [];
+  }
+
+  private async enrichApplications(items: any[]) {
+    const medicIds = Array.from(
+      new Set(
+        items.flatMap((item) =>
+          (Array.isArray(item?.applications) ? item.applications : [])
+            .map((app: any) => String(app?.medicId || '').trim())
+            .filter(Boolean),
+        ),
+      ),
+    );
+    if (!medicIds.length) return items;
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: medicIds } },
+      select: { id: true, fullName: true, email: true },
+    });
+    const byId = new Map(users.map((user) => [String(user.id), user]));
+    return items.map((item) => {
+      const applications = Array.isArray(item?.applications) ? item.applications : [];
+      const enriched = applications.map((app: any) => {
+        const medicId = String(app?.medicId || '');
+        const user = byId.get(medicId);
+        return {
+          ...app,
+          medicName: user?.fullName || null,
+          medicEmail: user?.email || null,
+        };
+      });
+      return { ...item, applications: enriched };
+    });
+  }
+
+  private parseTimeToMinutes(value?: string | null) {
+    if (!value) return null;
+    const raw = String(value).trim().toLowerCase();
+    const match = raw.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i);
+    if (!match) return null;
+    let hours = Number(match[1] || 0);
+    const minutes = Number(match[2] || 0);
+    const meridiem = match[3];
+    if (Number.isNaN(hours) || Number.isNaN(minutes)) return null;
+    if (minutes < 0 || minutes > 59) return null;
+    if (meridiem) {
+      if (hours === 12) hours = 0;
+      if (meridiem === 'pm') hours += 12;
+    }
+    if (hours < 0 || hours > 23) return null;
+    return hours * 60 + minutes;
+  }
+
+  private minutesToTime(minutes: number) {
+    const safe = Math.max(0, Math.min(24 * 60, Math.round(minutes)));
+    const hours = Math.floor(safe / 60);
+    const mins = safe % 60;
+    return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`;
+  }
+
+  private parseDate(value?: string | null) {
+    if (!value) return null;
+    const raw = String(value).trim();
+    if (!raw) return null;
+    const parsed = new Date(`${raw}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed;
+  }
+
+  private formatDate(value: Date) {
+    return value.toISOString().slice(0, 10);
+  }
+
+  private addDays(value: Date, days: number) {
+    const next = new Date(value);
+    next.setDate(next.getDate() + days);
+    return next;
+  }
+
+  private normalizeRepeatDays(values: any[]) {
+    const map: Record<string, number> = {
+      sun: 0,
+      mon: 1,
+      tue: 2,
+      wed: 3,
+      thu: 4,
+      fri: 5,
+      sat: 6,
+      sunday: 0,
+      monday: 1,
+      tuesday: 2,
+      wednesday: 3,
+      thursday: 4,
+      friday: 5,
+      saturday: 6,
+    };
+    return values
+      .map((value) => String(value || '').trim().toLowerCase())
+      .map((value) => map[value])
+      .filter((value) => typeof value === 'number') as number[];
+  }
+
+  private generateRecurringDates(input: {
+    shiftDate?: string | null;
+    repeatInterval?: string | null;
+    repeatDays?: any[];
+    horizonDays?: number;
+  }) {
+    const baseDate = this.parseDate(input.shiftDate);
+    if (!baseDate) return [];
+    const interval = String(input.repeatInterval || '').trim().toUpperCase();
+    if (!interval || interval === 'NONE') return [];
+    const horizonDays = Math.max(1, this.normalizeNumber(input.horizonDays, 28));
+    const endDate = this.addDays(baseDate, horizonDays);
+    const repeatDayIndexes = this.normalizeRepeatDays(input.repeatDays || []);
+    const results: string[] = [];
+    for (let cursor = this.addDays(baseDate, 1); cursor <= endDate; cursor = this.addDays(cursor, 1)) {
+      if (interval === 'DAILY') {
+        results.push(this.formatDate(cursor));
+        continue;
+      }
+      if (interval === 'WEEKLY') {
+        if (repeatDayIndexes.length === 0) continue;
+        if (repeatDayIndexes.includes(cursor.getDay())) {
+          results.push(this.formatDate(cursor));
+        }
+        continue;
+      }
+      if (interval === 'MONTHLY') {
+        if (cursor.getDate() === baseDate.getDate()) {
+          results.push(this.formatDate(cursor));
+        }
+      }
+    }
+    return results;
+  }
+
+  private generateSlots(input: {
+    startTime?: string | null;
+    endTime?: string | null;
+    consultationDuration?: number | null;
+    bufferMinutes?: number | null;
+    breakMinutes?: number | null;
+    maxPatients?: number | null;
+  }) {
+    const start = this.parseTimeToMinutes(input.startTime);
+    const end = this.parseTimeToMinutes(input.endTime);
+    const duration = this.normalizeNumber(input.consultationDuration, 0);
+    if (start === null || end === null || duration <= 0 || end <= start) return [];
+    const buffer = Math.max(0, this.normalizeNumber(input.bufferMinutes, 0));
+    const breakMinutes = Math.max(0, this.normalizeNumber(input.breakMinutes, 0));
+    const maxPatients = Math.max(0, this.normalizeNumber(input.maxPatients, 0));
+
+    let effectiveEnd = end;
+    if (breakMinutes > 0 && end - start > breakMinutes) {
+      effectiveEnd = end - breakMinutes;
+    }
+
+    const slots: Array<{ start: string; end: string }> = [];
+    for (let cursor = start; cursor + duration <= effectiveEnd; cursor += duration + buffer) {
+      slots.push({
+        start: this.minutesToTime(cursor),
+        end: this.minutesToTime(cursor + duration),
+      });
+      if (maxPatients > 0 && slots.length >= maxPatients) break;
+    }
+    return slots;
+  }
+
+  private hasTimeOverlap(aStart: string | null, aEnd: string | null, bStart: number, bEnd: number) {
+    const start = this.parseTimeToMinutes(aStart);
+    const end = this.parseTimeToMinutes(aEnd);
+    if (start === null || end === null) return false;
+    return start < bEnd && end > bStart;
+  }
+
   private normalizeOpportunityType(value: any, fallback: 'SHIFT' | 'JOB' = 'SHIFT') {
     const normalized = String(value || '').trim().toUpperCase();
     if (normalized === 'JOB' || normalized === 'SHIFT') return normalized as 'SHIFT' | 'JOB';
@@ -328,9 +517,18 @@ export class ShiftsController {
     @Query('mine') mine?: string,
     @Query('opportunityType') opportunityType?: string,
   ) {
+    const role = String(req.user?.role || '').toUpperCase();
     const mineOnly = String(mine || '').toLowerCase() === 'true' || mine === '1';
     const currentUserId = req.user?.userId;
     const where: any = {};
+
+    if (role !== 'MEDIC') {
+      if (role === 'HOSPITAL_ADMIN' || role === 'SUPER_ADMIN') {
+        if (!mineOnly) return [];
+      } else {
+        return [];
+      }
+    }
 
     if (mineOnly && currentUserId) {
       where.createdBy = currentUserId;
@@ -338,7 +536,7 @@ export class ShiftsController {
     if (status) {
       where.status = String(status || '').toUpperCase();
     } else if (!mineOnly) {
-      where.status = { not: 'CANCELLED' };
+      where.status = { notIn: ['CANCELLED', 'CLOSED'] };
     }
     if (search) {
       const searchText = String(search).trim();
@@ -371,10 +569,11 @@ export class ShiftsController {
       return [];
     }
 
-    return this.db.shift.findMany({
+    const items = await this.db.shift.findMany({
       where,
       orderBy: { updatedAt: 'desc' },
     });
+    return mineOnly ? this.enrichApplications(items) : items;
   }
 
   @Post()
@@ -406,14 +605,75 @@ export class ShiftsController {
       null;
     const shiftRequirements =
       this.sanitizeText(body?.requirements ?? body?.specifications) ?? null;
+    const shiftDate = this.sanitizeText(body?.shiftDate ?? body?.date);
+    const startTime = this.sanitizeText(body?.startTime);
+    const endTime = this.sanitizeText(body?.endTime);
+    const shiftType = this.sanitizeText(body?.shiftType);
+    const department = this.sanitizeText(body?.department);
+    const doctorId = this.sanitizeText(body?.doctorId ?? body?.medicId);
+    const hospitalId = this.sanitizeText(body?.hospitalId) ?? userId;
+    const consultationDuration = this.normalizeNumber(body?.consultationDuration, 0);
+    const maxPatients = this.normalizeNumber(body?.maxPatients, 0);
+    const breakMinutes = this.normalizeNumber(body?.breakMinutes, 0);
+    const bufferMinutes = this.normalizeNumber(body?.bufferMinutes, 0);
+    const hospitalBranch = this.sanitizeText(body?.hospitalBranch);
+    const roomNumber = this.sanitizeText(body?.roomNumber);
+    const consultationTypes = this.parseList(body?.consultationTypes);
+    const isAvailable = this.parseBoolean(body?.isAvailable, true);
+    const walkInAllowed = this.parseBoolean(body?.walkInAllowed, false);
+    const emergencySlotReserved = this.parseBoolean(body?.emergencySlotReserved, false);
+    const repeatInterval =
+      this.sanitizeText(body?.repeatInterval ?? body?.repeat) ?? null;
+    const repeatDays = this.parseList(body?.repeatDays);
+
+    const startMinutes = this.parseTimeToMinutes(startTime);
+    const endMinutes = this.parseTimeToMinutes(endTime);
+    const computedHours =
+      startMinutes !== null && endMinutes !== null && endMinutes > startMinutes
+        ? Math.round(((endMinutes - startMinutes) / 60) * 100) / 100
+        : this.normalizeNumber(body?.hours, 0);
+    if (doctorId && shiftDate && startMinutes !== null && endMinutes !== null) {
+      const existingShifts = await this.db.shift.findMany({
+        where: {
+          doctorId,
+          shiftDate,
+          status: { notIn: ['CANCELLED', 'CANCELED'] },
+        },
+      });
+      const overlaps = existingShifts.some((existing: any) =>
+        this.hasTimeOverlap(existing?.startTime || null, existing?.endTime || null, startMinutes, endMinutes),
+      );
+      if (overlaps) {
+        throw new BadRequestException('Shift time conflicts with an existing doctor schedule.');
+      }
+    }
 
     const payload: any = {
       title: body.title || body.task,
       description: body.description || body.summary || null,
       specifications: shiftRequirements,
       specialization: body.specialization || body.category || null,
+      department,
+      doctorId,
+      hospitalId,
+      shiftDate,
+      startTime,
+      endTime,
+      shiftType,
+      consultationDuration,
+      maxPatients,
+      breakMinutes,
+      bufferMinutes,
+      hospitalBranch,
+      roomNumber,
+      consultationTypes: consultationTypes.length ? consultationTypes : null,
+      isAvailable,
+      walkInAllowed,
+      emergencySlotReserved,
+      repeatInterval,
+      repeatDays: repeatDays.length ? repeatDays : null,
       requiredMedics: Number(body.requiredMedics || body.medicsRequired || 0),
-      hours: Number(body.hours || 0),
+      hours: Number(computedHours || 0),
       payType: body.payType,
       payAmount: Number(body.payAmount || 0),
       status: 'OPEN',
@@ -421,6 +681,14 @@ export class ShiftsController {
       hospitalName: employerName,
       location: employerLocation,
       applications: [],
+      slots: this.generateSlots({
+        startTime,
+        endTime,
+        consultationDuration,
+        bufferMinutes,
+        breakMinutes,
+        maxPatients,
+      }),
     };
 
     if (!this.sanitizeText(payload.title)) {
@@ -429,13 +697,72 @@ export class ShiftsController {
         missingFields: ['Shift title'],
       });
     }
+    const missingFields: string[] = [];
+    if (!this.sanitizeText(payload.department)) missingFields.push('Department');
+    if (!this.sanitizeText(payload.specialization)) missingFields.push('Specialty');
+    if (!this.sanitizeText(payload.shiftDate)) missingFields.push('Shift date');
+    if (!this.sanitizeText(payload.startTime)) missingFields.push('Start time');
+    if (!this.sanitizeText(payload.endTime)) missingFields.push('End time');
+    if (!this.sanitizeText(payload.shiftType)) missingFields.push('Shift type');
+    if (this.normalizeNumber(payload.consultationDuration, 0) <= 0) missingFields.push('Consultation duration');
+    if (this.normalizeNumber(payload.maxPatients, 0) <= 0) missingFields.push('Max patients');
     if (this.normalizeNumber(payload.requiredMedics, 0) <= 0 || this.normalizeNumber(payload.hours, 0) <= 0) {
+      missingFields.push('Required medics', 'Working hours');
+    }
+    if (missingFields.length) {
       throw new BadRequestException({
         message: 'Shift details incomplete',
-        missingFields: ['Required medics', 'Working hours'],
+        missingFields,
       });
     }
-    return this.db.shift.create({ data: payload });
+    const createdShift = await this.db.shift.create({ data: payload });
+    const recurringDates = this.generateRecurringDates({
+      shiftDate,
+      repeatInterval,
+      repeatDays,
+      horizonDays: 28,
+    });
+    if (recurringDates.length) {
+      const baseSlots = payload.slots || [];
+      const batch: any[] = [];
+      for (const date of recurringDates) {
+        if (doctorId && startMinutes !== null && endMinutes !== null) {
+          const existingShifts = await this.db.shift.findMany({
+            where: {
+              doctorId,
+              shiftDate: date,
+              status: { notIn: ['CANCELLED', 'CANCELED'] },
+            },
+          });
+          const overlaps = existingShifts.some((existing: any) =>
+            this.hasTimeOverlap(existing?.startTime || null, existing?.endTime || null, startMinutes, endMinutes),
+          );
+          if (overlaps) {
+            continue;
+          }
+        }
+        const exists = await this.db.shift.findFirst({
+          where: {
+            createdBy: userId,
+            shiftDate: date,
+            startTime,
+            endTime,
+            ...(doctorId ? { doctorId } : {}),
+          },
+        });
+        if (exists) continue;
+        batch.push({
+          ...payload,
+          shiftDate: date,
+          applications: [],
+          slots: baseSlots,
+        });
+      }
+      if (batch.length) {
+        await this.db.shift.createMany({ data: batch });
+      }
+    }
+    return createdShift;
   }
 
   @Post(':id/apply')
@@ -447,6 +774,9 @@ export class ShiftsController {
 
     const shift = await this.db.shift.findUnique({ where: { id } });
     if (!shift) return { success: false };
+    if (['CANCELLED', 'CLOSED'].includes(String(shift?.status || '').toUpperCase())) {
+      throw new BadRequestException('This shift is no longer accepting applications.');
+    }
 
     const userId = req.user?.userId;
     await ensureMedicProfileComplete(this.prisma, userId);
@@ -477,6 +807,66 @@ export class ShiftsController {
       success: true,
       application: nextApplications[nextApplications.length - 1],
     };
+  }
+
+  @Put(':id/applications/:medicId/approve')
+  async approveApplication(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Param('medicId') medicId: string,
+  ) {
+    const shift = (await this.db.shift.findUnique({ where: { id } })) as any;
+    if (!shift) throw new NotFoundException('Shift not found.');
+    const role = String(req.user?.role || '').toUpperCase();
+    const userId = req.user?.userId;
+    if (shift.createdBy !== userId && role !== 'SUPER_ADMIN') {
+      throw new ForbiddenException('You are not allowed to approve this application.');
+    }
+
+    const applications = Array.isArray(shift.applications) ? shift.applications : [];
+    const nextApplications = applications.map((app: any) => {
+      if (String(app?.medicId || '') !== String(medicId || '')) return app;
+      return { ...app, status: 'APPROVED', reviewedAt: new Date().toISOString() };
+    });
+    const target = Number(shift.requiredMedics || 0);
+    const approvedCount = nextApplications.filter(
+      (app: any) => String(app?.status || '').toUpperCase() === 'APPROVED',
+    ).length;
+    const nextStatus = target > 0 && approvedCount >= target ? 'CLOSED' : shift.status;
+    const updated = await this.db.shift.update({
+      where: { id },
+      data: {
+        applications: nextApplications,
+        status: nextStatus,
+      },
+    });
+    return updated;
+  }
+
+  @Put(':id/applications/:medicId/reject')
+  async rejectApplication(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Param('medicId') medicId: string,
+  ) {
+    const shift = (await this.db.shift.findUnique({ where: { id } })) as any;
+    if (!shift) throw new NotFoundException('Shift not found.');
+    const role = String(req.user?.role || '').toUpperCase();
+    const userId = req.user?.userId;
+    if (shift.createdBy !== userId && role !== 'SUPER_ADMIN') {
+      throw new ForbiddenException('You are not allowed to reject this application.');
+    }
+
+    const applications = Array.isArray(shift.applications) ? shift.applications : [];
+    const nextApplications = applications.map((app: any) => {
+      if (String(app?.medicId || '') !== String(medicId || '')) return app;
+      return { ...app, status: 'REJECTED', reviewedAt: new Date().toISOString() };
+    });
+    const updated = await this.db.shift.update({
+      where: { id },
+      data: { applications: nextApplications },
+    });
+    return updated;
   }
 
   @Post(':id/unapply')
@@ -565,9 +955,50 @@ export class ShiftsController {
     const nextDescription = body.description ?? body.summary ?? shift.description;
     const nextSpecialization =
       body.specialization ?? body.category ?? body.department ?? shift.specialization;
+    const nextDepartment = body.department ?? shift.department;
+    const nextDoctorId = body.doctorId ?? body.medicId ?? shift.doctorId;
+    const nextHospitalId = body.hospitalId ?? shift.hospitalId;
+    const nextShiftDate = body.shiftDate ?? body.date ?? shift.shiftDate;
+    const nextStartTime = body.startTime ?? shift.startTime;
+    const nextEndTime = body.endTime ?? shift.endTime;
+    const nextShiftType = body.shiftType ?? shift.shiftType;
+    const nextConsultationDuration = body.consultationDuration ?? shift.consultationDuration;
+    const nextMaxPatients = body.maxPatients ?? shift.maxPatients;
+    const nextBreakMinutes = body.breakMinutes ?? shift.breakMinutes;
+    const nextBufferMinutes = body.bufferMinutes ?? shift.bufferMinutes;
+    const nextHospitalBranch = body.hospitalBranch ?? shift.hospitalBranch;
+    const nextRoomNumber = body.roomNumber ?? shift.roomNumber;
+    const nextConsultationTypes = body.consultationTypes ?? shift.consultationTypes;
+    const nextIsAvailable = body.isAvailable ?? shift.isAvailable;
+    const nextWalkInAllowed = body.walkInAllowed ?? shift.walkInAllowed;
+    const nextEmergencySlotReserved = body.emergencySlotReserved ?? shift.emergencySlotReserved;
+    const nextRepeatInterval = body.repeatInterval ?? body.repeat ?? shift.repeatInterval;
+    const nextRepeatDays = body.repeatDays ?? shift.repeatDays;
     const nextRequiredMedics = body.requiredMedics ?? body.medicsRequired ?? shift.requiredMedics;
-    const nextHours = body.hours ?? shift.hours;
     const nextLocation = body.location ?? shift.location;
+
+    const startMinutes = this.parseTimeToMinutes(nextStartTime);
+    const endMinutes = this.parseTimeToMinutes(nextEndTime);
+    const computedHours =
+      startMinutes !== null && endMinutes !== null && endMinutes > startMinutes
+        ? Math.round(((endMinutes - startMinutes) / 60) * 100) / 100
+        : this.normalizeNumber(body?.hours ?? shift.hours, 0);
+    if (nextDoctorId && nextShiftDate && startMinutes !== null && endMinutes !== null) {
+      const existingShifts = await this.db.shift.findMany({
+        where: {
+          doctorId: nextDoctorId,
+          shiftDate: nextShiftDate,
+          status: { notIn: ['CANCELLED', 'CANCELED'] },
+          NOT: { id },
+        },
+      });
+      const overlaps = existingShifts.some((existing: any) =>
+        this.hasTimeOverlap(existing?.startTime || null, existing?.endTime || null, startMinutes, endMinutes),
+      );
+      if (overlaps) {
+        throw new BadRequestException('Shift time conflicts with an existing doctor schedule.');
+      }
+    }
 
     if (!this.sanitizeText(nextTitle)) {
       throw new BadRequestException({
@@ -575,10 +1006,22 @@ export class ShiftsController {
         missingFields: ['Shift title'],
       });
     }
-    if (this.normalizeNumber(nextRequiredMedics, 0) <= 0 || this.normalizeNumber(nextHours, 0) <= 0) {
+    const missingFields: string[] = [];
+    if (!this.sanitizeText(nextDepartment)) missingFields.push('Department');
+    if (!this.sanitizeText(nextSpecialization)) missingFields.push('Specialty');
+    if (!this.sanitizeText(nextShiftDate)) missingFields.push('Shift date');
+    if (!this.sanitizeText(nextStartTime)) missingFields.push('Start time');
+    if (!this.sanitizeText(nextEndTime)) missingFields.push('End time');
+    if (!this.sanitizeText(nextShiftType)) missingFields.push('Shift type');
+    if (this.normalizeNumber(nextConsultationDuration, 0) <= 0) missingFields.push('Consultation duration');
+    if (this.normalizeNumber(nextMaxPatients, 0) <= 0) missingFields.push('Max patients');
+    if (this.normalizeNumber(nextRequiredMedics, 0) <= 0 || this.normalizeNumber(computedHours, 0) <= 0) {
+      missingFields.push('Required medics', 'Working hours');
+    }
+    if (missingFields.length) {
       throw new BadRequestException({
         message: 'Shift details incomplete',
-        missingFields: ['Required medics', 'Working hours'],
+        missingFields,
       });
     }
 
@@ -589,12 +1032,41 @@ export class ShiftsController {
         description: nextDescription,
         specifications: shiftRequirements,
         specialization: nextSpecialization,
+        department: nextDepartment,
+        doctorId: nextDoctorId,
+        hospitalId: nextHospitalId,
+        shiftDate: nextShiftDate,
+        startTime: nextStartTime,
+        endTime: nextEndTime,
+        shiftType: nextShiftType,
+        consultationDuration: this.normalizeNumber(nextConsultationDuration, 0),
+        maxPatients: this.normalizeNumber(nextMaxPatients, 0),
+        breakMinutes: this.normalizeNumber(nextBreakMinutes, 0),
+        bufferMinutes: this.normalizeNumber(nextBufferMinutes, 0),
+        hospitalBranch: this.sanitizeText(nextHospitalBranch),
+        roomNumber: this.sanitizeText(nextRoomNumber),
+        consultationTypes: Array.isArray(nextConsultationTypes)
+          ? nextConsultationTypes
+          : this.parseList(nextConsultationTypes),
+        isAvailable: this.parseBoolean(nextIsAvailable, true),
+        walkInAllowed: this.parseBoolean(nextWalkInAllowed, false),
+        emergencySlotReserved: this.parseBoolean(nextEmergencySlotReserved, false),
+        repeatInterval: this.sanitizeText(nextRepeatInterval),
+        repeatDays: Array.isArray(nextRepeatDays) ? nextRepeatDays : this.parseList(nextRepeatDays),
         requiredMedics: nextRequiredMedics,
-        hours: nextHours,
+        hours: computedHours || 0,
         payType: body.payType ?? shift.payType,
         payAmount: body.payAmount ?? shift.payAmount,
         location: nextLocation,
         status: body.status ?? shift.status,
+        slots: this.generateSlots({
+          startTime: nextStartTime,
+          endTime: nextEndTime,
+          consultationDuration: this.normalizeNumber(nextConsultationDuration, 0),
+          bufferMinutes: this.normalizeNumber(nextBufferMinutes, 0),
+          breakMinutes: this.normalizeNumber(nextBreakMinutes, 0),
+          maxPatients: this.normalizeNumber(nextMaxPatients, 0),
+        }),
       },
     });
     return updated;

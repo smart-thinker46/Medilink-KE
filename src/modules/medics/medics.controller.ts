@@ -29,6 +29,76 @@ export class MedicsController {
     return String(role || '').toUpperCase();
   }
 
+  private async buildMedicList(medics: any[]) {
+    const extrasMap = await getProfileExtrasMap(this.prisma, medics.map((m) => m.id));
+    return medics.map((medic) => {
+      const extras = extrasMap.get(medic.id) || {};
+      const locationObject =
+        extras.location && typeof extras.location === 'object' ? extras.location : null;
+      const location =
+        extras.locationAddress ||
+        (typeof extras.location === 'string'
+          ? extras.location
+          : locationObject?.address || null);
+      const locationLat =
+        locationObject?.lat !== undefined && locationObject?.lat !== null
+          ? Number(locationObject.lat)
+          : null;
+      const locationLng =
+        locationObject?.lng !== undefined && locationObject?.lng !== null
+          ? Number(locationObject.lng)
+          : null;
+      const availabilityDays = Array.isArray(extras.availableDays)
+        ? extras.availableDays
+        : typeof extras.availableDays === 'string'
+          ? extras.availableDays
+              .split(',')
+              .map((value: string) => value.trim())
+              .filter(Boolean)
+          : Array.isArray(extras.preferredShiftTypes)
+            ? extras.preferredShiftTypes
+            : [];
+      const availability =
+        extras.availability ||
+        (Array.isArray(availabilityDays) && availabilityDays.length
+          ? availabilityDays.join(', ')
+          : '');
+      const languages = Array.isArray(extras.languages)
+        ? extras.languages
+        : typeof extras.languages === 'string'
+          ? extras.languages
+              .split(',')
+              .map((value: string) => value.trim())
+              .filter(Boolean)
+          : [];
+      return {
+        id: medic.id,
+        name: medic.fullName,
+        firstName: medic.fullName?.split(' ')[0],
+        lastName: medic.fullName?.split(' ').slice(1).join(' '),
+        email: medic.email,
+        phone: medic.phone || extras.phone || null,
+        avatarUrl: extras.profilePhoto || extras.avatarUrl || null,
+        specialization: medic.medicProfile?.specialization || extras.specialization,
+        experienceYears: medic.medicProfile?.experienceYears || extras.experienceYears,
+        category: extras.category || extras.services || extras.specialty,
+        location,
+        locationAddress: location,
+        locationLat,
+        locationLng,
+        locationCoordinates:
+          locationLat !== null && locationLng !== null
+            ? { lat: locationLat, lng: locationLng }
+            : null,
+        availabilityDays,
+        availability,
+        languages,
+        cv: extras.cv || null,
+        rating: extras.rating ?? 4.7,
+      };
+    });
+  }
+
   private normalizeMoney(value: unknown) {
     const amount = Number(value || 0);
     return Number.isFinite(amount) ? amount : 0;
@@ -119,10 +189,16 @@ export class MedicsController {
     @Query('experienceMin') experienceMin?: string,
     @Query('experienceMax') experienceMax?: string,
     @Query('availabilityDay') availabilityDay?: string,
+    @Query('medicIds') medicIds?: string,
   ) {
+    const medicIdList = String(medicIds || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
     const medics = await this.prisma.user.findMany({
       where: {
         role: 'MEDIC',
+        ...(medicIdList.length ? { id: { in: medicIdList } } : {}),
         ...(search
           ? {
               OR: [
@@ -136,73 +212,7 @@ export class MedicsController {
       take: 50,
     });
 
-    const extrasMap = await getProfileExtrasMap(this.prisma, medics.map((m) => m.id));
-    let list = medics.map((medic) => {
-      const extras = extrasMap.get(medic.id) || {};
-      const locationObject =
-        extras.location && typeof extras.location === 'object' ? extras.location : null;
-      const location =
-        extras.locationAddress ||
-        (typeof extras.location === 'string'
-          ? extras.location
-          : locationObject?.address || null);
-      const locationLat =
-        locationObject?.lat !== undefined && locationObject?.lat !== null
-          ? Number(locationObject.lat)
-          : null;
-      const locationLng =
-        locationObject?.lng !== undefined && locationObject?.lng !== null
-          ? Number(locationObject.lng)
-          : null;
-      const availabilityDays = Array.isArray(extras.availableDays)
-        ? extras.availableDays
-        : typeof extras.availableDays === 'string'
-          ? extras.availableDays
-              .split(',')
-              .map((value: string) => value.trim())
-              .filter(Boolean)
-          : Array.isArray(extras.preferredShiftTypes)
-            ? extras.preferredShiftTypes
-            : [];
-      const availability =
-        extras.availability ||
-        (Array.isArray(availabilityDays) && availabilityDays.length
-          ? availabilityDays.join(', ')
-          : '');
-      const languages = Array.isArray(extras.languages)
-        ? extras.languages
-        : typeof extras.languages === 'string'
-          ? extras.languages
-              .split(',')
-              .map((value: string) => value.trim())
-              .filter(Boolean)
-          : [];
-      return {
-        id: medic.id,
-        name: medic.fullName,
-        firstName: medic.fullName?.split(' ')[0],
-        lastName: medic.fullName?.split(' ').slice(1).join(' '),
-        email: medic.email,
-        phone: medic.phone || extras.phone || null,
-        avatarUrl: extras.profilePhoto || extras.avatarUrl || null,
-        specialization: medic.medicProfile?.specialization || extras.specialization,
-        experienceYears: medic.medicProfile?.experienceYears || extras.experienceYears,
-        category: extras.category || extras.services || extras.specialty,
-        location,
-        locationAddress: location,
-        locationLat,
-        locationLng,
-        locationCoordinates:
-          locationLat !== null && locationLng !== null
-            ? { lat: locationLat, lng: locationLng }
-            : null,
-        availabilityDays,
-        availability,
-        languages,
-        cv: extras.cv || null,
-        rating: extras.rating ?? 4.7,
-      };
-    });
+    let list = await this.buildMedicList(medics);
 
     if (search) {
       const value = search.toLowerCase();
@@ -257,6 +267,39 @@ export class MedicsController {
     return list;
   }
 
+  @Get('hired')
+  async hiredMedics(@Req() req: any, @Query('hospitalAdminId') hospitalAdminId?: string) {
+    const role = this.normalizeRole(req.user?.role);
+    const currentUserId = String(req.user?.userId || '').trim();
+    if (!currentUserId) {
+      throw new BadRequestException('Invalid user session.');
+    }
+    if (!['HOSPITAL_ADMIN', 'SUPER_ADMIN'].includes(role)) {
+      throw new ForbiddenException('Only hospital admins can view hired medics.');
+    }
+
+    const targetHospitalId =
+      role === 'SUPER_ADMIN' && hospitalAdminId ? String(hospitalAdminId).trim() : currentUserId;
+    const hires = (InMemoryStore.list('medicHires') as any[]).filter(
+      (hire) => String(hire?.hospitalAdminId || '') === targetHospitalId,
+    );
+    const medicIds = Array.from(
+      new Set(
+        hires
+          .map((hire) => String(hire?.medicId || '').trim())
+          .filter(Boolean),
+      ),
+    );
+    if (!medicIds.length) return [];
+
+    const medics = await this.prisma.user.findMany({
+      where: { id: { in: medicIds }, role: 'MEDIC' },
+      include: { medicProfile: true },
+      take: 100,
+    });
+    return this.buildMedicList(medics);
+  }
+
   @Get('hires')
   async myHires(@Req() req: any, @Query('medicId') requestedMedicId?: string) {
     const medicId = await this.resolveMedicScope(req, requestedMedicId);
@@ -277,8 +320,18 @@ export class MedicsController {
       select: { id: true, type: true, patientId: true, createdAt: true },
       orderBy: { createdAt: 'desc' },
     });
+    const appointments = await this.prisma.appointment.findMany({
+      where: { medicId },
+      select: { id: true, patientId: true, status: true, fee: true, paidAt: true, paymentId: true },
+      orderBy: { createdAt: 'desc' },
+    });
     const patientIds = Array.from(
-      new Set(records.map((item) => item.patientId).filter(Boolean)),
+      new Set(
+        [
+          ...records.map((item) => item.patientId),
+          ...appointments.map((item) => item.patientId),
+        ].filter(Boolean),
+      ),
     );
     const extrasMap = await getProfileExtrasMap(this.prisma, patientIds);
 
@@ -319,18 +372,45 @@ export class MedicsController {
       underTreatmentPatientIds.includes(item?.userId),
     );
 
+    const paymentAppointmentIds = new Set(
+      medicPayments
+        .map((item: any) => String(item?.appointmentId || '').trim())
+        .filter(Boolean),
+    );
+    const paidAppointments = appointments.filter(
+      (appt) => Boolean(appt?.paidAt || appt?.paymentId) && !paymentAppointmentIds.has(String(appt.id)),
+    );
+    const pendingAppointments = appointments.filter(
+      (appt) =>
+        !appt?.paidAt &&
+        !appt?.paymentId &&
+        appt?.fee != null &&
+        Number(appt?.fee) > 0 &&
+        !paymentAppointmentIds.has(String(appt.id)),
+    );
+
+    const appointmentPaidTotal = paidAppointments.reduce(
+      (sum, appt) => sum + this.normalizeMoney(appt?.fee),
+      0,
+    );
+    const appointmentPendingTotal = pendingAppointments.reduce(
+      (sum, appt) => sum + this.normalizeMoney(appt?.fee),
+      0,
+    );
+
     const moneyMade = paidPayments.reduce(
       (sum: number, item: any) => sum + this.normalizeMoney(item?.amount),
       0,
-    );
+    ) + appointmentPaidTotal;
     const pendingMoney = pendingPayments.reduce(
       (sum: number, item: any) => sum + this.normalizeMoney(item?.amount),
       0,
-    );
+    ) + appointmentPendingTotal;
     const pendingFromTreatingPatients = pendingFromUnderTreatment.reduce(
       (sum: number, item: any) => sum + this.normalizeMoney(item?.amount),
       0,
     );
+    const pendingAppointmentFees = appointmentPendingTotal;
     const failedPayments = medicPayments.filter(
       (item: any) => this.normalizeRole(item?.status) === 'FAILED',
     );
@@ -344,6 +424,19 @@ export class MedicsController {
     const conditionsUpdated = records.filter(
       (item) => String(item.type || '').toLowerCase() === 'condition',
     ).length;
+
+    const appointmentTotals = appointments.reduce(
+      (acc, appt) => {
+        const status = this.normalizeRole(appt?.status || 'pending');
+        acc.total += 1;
+        if (status === 'CONFIRMED') acc.confirmed += 1;
+        else if (status === 'CANCELLED' || status === 'CANCELED') acc.cancelled += 1;
+        else if (status === 'COMPLETED') acc.completed += 1;
+        else acc.pending += 1;
+        return acc;
+      },
+      { total: 0, confirmed: 0, cancelled: 0, pending: 0, completed: 0 },
+    );
 
     return {
       totals: {
@@ -359,6 +452,12 @@ export class MedicsController {
         moneyMade,
         pendingMoney,
         pendingFromTreatingPatients,
+        pendingAppointmentFees,
+        totalAppointments: appointmentTotals.total,
+        confirmedAppointments: appointmentTotals.confirmed,
+        pendingAppointments: appointmentTotals.pending,
+        cancelledAppointments: appointmentTotals.cancelled,
+        completedAppointments: appointmentTotals.completed,
       },
       wallet: {
         currency: 'KES',
@@ -382,6 +481,14 @@ export class MedicsController {
         finance: {
           paid: moneyMade,
           pending: pendingMoney,
+        },
+        appointments: {
+          total: appointmentTotals.total,
+          confirmed: appointmentTotals.confirmed,
+          pending: appointmentTotals.pending,
+          cancelled: appointmentTotals.cancelled,
+          completed: appointmentTotals.completed,
+          pendingAmount: pendingAppointmentFees,
         },
         records: {
           prescriptions: prescriptionsIssued,

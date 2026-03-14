@@ -56,22 +56,49 @@ export class OrdersController {
     const userId = req.user?.userId;
     const tenantId = req.user?.tenantId;
     const allOrders = InMemoryStore.list('orders');
+    let visibleOrders: any[] = [];
 
     if (role === 'SUPER_ADMIN') {
-      return allOrders;
-    }
-
-    if (role === 'PHARMACY_ADMIN') {
+      visibleOrders = allOrders;
+    } else if (role === 'PHARMACY_ADMIN') {
       const ownerIds = new Set([tenantId, userId].filter(Boolean));
-      return allOrders.filter((order: any) => ownerIds.has(order?.pharmacyId));
+      visibleOrders = allOrders.filter((order: any) => ownerIds.has(order?.pharmacyId));
+    } else {
+      visibleOrders = allOrders.filter(
+        (order: any) =>
+          order?.patientId === userId ||
+          order?.buyerId === userId ||
+          order?.userId === userId,
+      );
     }
 
-    return allOrders.filter(
-      (order: any) =>
-        order?.patientId === userId ||
-        order?.buyerId === userId ||
-        order?.userId === userId,
+    const patientIds = Array.from(
+      new Set(
+        visibleOrders
+          .map((order: any) => order?.patientId || order?.patient_id)
+          .filter(Boolean),
+      ),
     );
+    const patients = patientIds.length
+      ? await this.prisma.user.findMany({
+          where: { id: { in: patientIds } },
+          select: { id: true, fullName: true },
+        })
+      : [];
+    const patientMap: Map<string, string> = new Map(
+      patients.map((patient) => [String(patient.id), patient.fullName || '']),
+    );
+
+    return visibleOrders.map((order: any) => {
+      const patientId = order?.patientId || order?.patient_id;
+      return {
+        ...order,
+        patientName:
+          order?.patientName ||
+          order?.patient?.fullName ||
+          (patientId ? patientMap.get(String(patientId)) || null : null),
+      };
+    });
   }
 
   @Post()
@@ -242,9 +269,15 @@ export class OrdersController {
       createdAt: new Date().toISOString(),
     });
     const [patient, pharmacy] = await Promise.all([
-      this.prisma.user.findUnique({ where: { id: record.patientId }, select: { email: true, fullName: true } }),
+      this.prisma.user.findUnique({
+        where: { id: record.patientId },
+        select: { email: true, fullName: true },
+      }),
       this.prisma.tenant.findUnique({ where: { id: record.pharmacyId }, select: { email: true, name: true } }),
     ]);
+    if (patient?.fullName) {
+      record.patientName = patient.fullName;
+    }
     const subject = 'Order Confirmation';
     if (patient?.email) {
       const locale = ((await getProfileExtras(this.prisma, record.patientId))?.language || 'en') as 'en' | 'sw';
@@ -290,6 +323,42 @@ export class OrdersController {
     if (updated) {
       const status = String(updated.status || '').toUpperCase();
       if (['COMPLETED', 'APPROVED', 'PAID', 'DELIVERED'].includes(status)) {
+        const paymentMethod = String(body?.paymentMethod || updated.paymentMethod || '').toUpperCase();
+        if (paymentMethod === 'CASH') {
+          const payments = InMemoryStore.list('payments') as any[];
+          const existingPayment = payments.find(
+            (item) => item?.orderId === updated.id && String(item?.status || '').toUpperCase() === 'PAID',
+          );
+          if (!existingPayment) {
+            const now = new Date().toISOString();
+            const receiptNumber = `MLK-CASH-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+            const cashPayment = InMemoryStore.create('payments', {
+              userId: body?.userId || updated.buyerId || updated.patientId || null,
+              payerEmail: body?.payerEmail,
+              payerRole: body?.payerRole,
+              amount: updated.total,
+              currency: updated.currency || 'KES',
+              method: 'cash',
+              type: 'ORDER',
+              description: body?.description || 'Cash payment',
+              recipientId: updated.pharmacyId,
+              recipientRole: 'PHARMACY_ADMIN',
+              orderId: updated.id,
+              status: 'PAID',
+              receiptNumber,
+              invoiceNumber: receiptNumber,
+              receiptIssuedAt: now,
+              createdAt: now,
+              updatedAt: now,
+            });
+            InMemoryStore.update('orders', updated.id, {
+              paymentId: cashPayment.id,
+              paidAt: now,
+              paymentMethod: 'CASH',
+              updatedAt: now,
+            });
+          }
+        }
         InMemoryStore.create('pharmacyEvents', {
           pharmacyId: updated.pharmacyId,
           type: 'CHECKOUT_COMPLETE',

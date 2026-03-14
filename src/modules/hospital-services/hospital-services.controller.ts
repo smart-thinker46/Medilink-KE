@@ -29,6 +29,22 @@ export class HospitalServicesController {
     return text.length ? text : '';
   }
 
+  private parseList(value: any) {
+    if (Array.isArray(value)) return value.filter(Boolean);
+    if (typeof value === 'string') {
+      return value
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+    return [];
+  }
+
+  private normalizeNumber(value: any) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
   private async resolveHospitalTenant(
     userId: string | undefined,
     role: string | undefined,
@@ -98,12 +114,30 @@ export class HospitalServicesController {
     if (!name) {
       throw new BadRequestException('Service name is required.');
     }
+    const doctors = this.parseList(body?.doctors);
+    const equipment = this.parseList(body?.equipment);
+    const costMin = this.normalizeNumber(body?.costMin ?? body?.cost_min);
+    const costMax = this.normalizeNumber(body?.costMax ?? body?.cost_max);
+    if (costMin === null) {
+      throw new BadRequestException('Service pricing is required (minimum cost).');
+    }
+    if (costMax !== null && costMax < costMin) {
+      throw new BadRequestException('Maximum cost cannot be less than minimum cost.');
+    }
+    const status = this.normalizeText(body?.status) || 'ACTIVE';
     const created = await this.db.hospitalService.create({
       data: {
         tenantId: tenant.id,
         name,
         description: this.normalizeText(body?.description) || null,
         category: this.normalizeText(body?.category) || null,
+        availability: this.normalizeText(body?.availability) || null,
+        costMin,
+        costMax: costMax ?? undefined,
+        department: this.normalizeText(body?.department) || null,
+        doctors: doctors.length ? doctors : null,
+        equipment: equipment.length ? equipment : null,
+        status,
       },
     });
     return created;
@@ -127,6 +161,20 @@ export class HospitalServicesController {
     }
 
     const name = this.normalizeText(body?.name);
+    const nextCostMin =
+      body?.costMin !== undefined || body?.cost_min !== undefined
+        ? this.normalizeNumber(body?.costMin ?? body?.cost_min)
+        : service.costMin;
+    const nextCostMax =
+      body?.costMax !== undefined || body?.cost_max !== undefined
+        ? this.normalizeNumber(body?.costMax ?? body?.cost_max)
+        : service.costMax;
+    if (nextCostMin === null) {
+      throw new BadRequestException('Service pricing is required (minimum cost).');
+    }
+    if (nextCostMax !== null && nextCostMax < nextCostMin) {
+      throw new BadRequestException('Maximum cost cannot be less than minimum cost.');
+    }
     const updated = await this.db.hospitalService.update({
       where: { id },
       data: {
@@ -136,6 +184,35 @@ export class HospitalServicesController {
           : {}),
         ...(body?.category !== undefined
           ? { category: this.normalizeText(body.category) || null }
+          : {}),
+        ...(body?.availability !== undefined
+          ? { availability: this.normalizeText(body.availability) || null }
+          : {}),
+        ...(body?.department !== undefined
+          ? { department: this.normalizeText(body.department) || null }
+          : {}),
+        ...(body?.costMin !== undefined || body?.cost_min !== undefined
+          ? { costMin: nextCostMin }
+          : {}),
+        ...(body?.costMax !== undefined || body?.cost_max !== undefined
+          ? { costMax: nextCostMax ?? undefined }
+          : {}),
+        ...(body?.doctors !== undefined
+          ? {
+              doctors: this.parseList(body.doctors).length
+                ? this.parseList(body.doctors)
+                : null,
+            }
+          : {}),
+        ...(body?.equipment !== undefined
+          ? {
+              equipment: this.parseList(body.equipment).length
+                ? this.parseList(body.equipment)
+                : null,
+            }
+          : {}),
+        ...(body?.status !== undefined
+          ? { status: this.normalizeText(body.status) || 'ACTIVE' }
           : {}),
       },
     });

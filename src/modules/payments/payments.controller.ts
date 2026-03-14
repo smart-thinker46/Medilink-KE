@@ -307,8 +307,9 @@ export class PaymentsController {
   @Post()
   async create(@Req() req: any, @Body() body: any) {
     const requestedMethod = body?.method ? String(body.method).trim().toLowerCase() : '';
-    if (requestedMethod && requestedMethod !== 'intasend') {
-      throw new BadRequestException('Only IntaSend payments are supported.');
+    const supportedMethods = new Set(['', 'intasend', 'mobile', 'bank', 'cash']);
+    if (!supportedMethods.has(requestedMethod)) {
+      throw new BadRequestException('Unsupported payment method.');
     }
     const isVideoCall = body.type === 'VIDEO_CALL';
     const appointmentId = body.appointmentId ? String(body.appointmentId).trim() : null;
@@ -351,13 +352,14 @@ export class PaymentsController {
             ? 'Video Call'
             : 'Payment');
     const currency = this.normalizeCurrency(body.currency);
+    const normalizedMethod = requestedMethod || 'intasend';
     const payment = InMemoryStore.create('payments', {
       userId: req.user?.userId,
       payerEmail: req.user?.email,
       payerRole: req.user?.role,
       amount,
       currency,
-      method: 'intasend',
+      method: normalizedMethod,
       type: body.type || 'PAYMENT',
       description,
       plan: body.plan,
@@ -375,6 +377,12 @@ export class PaymentsController {
       createdAt: now,
     });
 
+    if (normalizedMethod === 'cash' || normalizedMethod === 'bank' || normalizedMethod === 'mobile') {
+      payment.status = 'PAID';
+      payment.updatedAt = new Date().toISOString();
+      await this.sendPaymentNotifications(payment);
+      return payment;
+    }
     if (this.canAutoMarkPaid(req)) {
       payment.status = 'PAID';
       payment.updatedAt = new Date().toISOString();

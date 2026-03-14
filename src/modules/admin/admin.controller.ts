@@ -493,7 +493,6 @@ export class AdminController {
         blockedAt: extras.blockedAt || null,
         licenseNumber: extras.licenseNumber || extras.license || '',
         licenseFile: extras.license || extras.licenseUrl || '',
-        idPhoto: extras.idPhoto || extras.idPhotoUrl || extras.adminId || extras.adminIdUrl || '',
         idFront: extras.idFront || extras.idFrontUrl || '',
         idBack: extras.idBack || extras.idBackUrl || '',
         subscriptionActive: Boolean(extras.subscriptionActive),

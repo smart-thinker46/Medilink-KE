@@ -53,6 +53,18 @@ export class UsersController {
       .filter(Boolean);
   }
 
+  private parseTimeList(value: unknown) {
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => String(item || '').trim())
+        .filter(Boolean);
+    }
+    return String(value || '')
+      .split(/[;,]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
   private toFiniteOrNull(value: unknown) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
@@ -680,11 +692,21 @@ export class UsersController {
             typeof attachmentMetaObj?.frequency === 'string'
               ? attachmentMetaObj.frequency
               : 'As prescribed';
+          const takeTimes = this.parseTimeList(
+            attachmentMetaObj?.takeTimes ?? attachmentMetaObj?.takeTime ?? attachmentMetaObj?.time,
+          );
+          const takeTime = takeTimes.length > 0 ? takeTimes[0] : null;
+          const pillsPerDose = this.toFiniteOrNull(
+            attachmentMetaObj?.pillsPerDose ?? attachmentMetaObj?.pills,
+          );
           return {
             id: randomUUID(),
             name,
             dosage,
             frequency,
+            takeTime,
+            takeTimes,
+            pillsPerDose,
             active: true,
             takenCount: 0,
             missedCount: 0,
@@ -1103,17 +1125,30 @@ export class UsersController {
 
   @Post('patient-care-plan/medications')
   async addCarePlanMedication(@Req() req: any, @Body() body: any, @Query('patientId') requestedPatientId?: string) {
+    const role = this.normalizeRole(req.user?.role);
+    if (!['MEDIC', 'HOSPITAL_ADMIN', 'SUPER_ADMIN'].includes(role)) {
+      throw new ForbiddenException('Only medics or hospitals can update care plans.');
+    }
     const patientId = await this.resolvePatientScope(req, requestedPatientId);
     const extras = await getProfileExtras(this.prisma, patientId);
     const name = String(body?.name || '').trim();
     if (!name) {
       throw new BadRequestException('Medication name is required.');
     }
+    const takeTimes = this.parseTimeList(body?.takeTimes ?? body?.takeTime ?? body?.time);
+    if (takeTimes.length === 0) {
+      throw new BadRequestException('Take time is required.');
+    }
+    const takeTime = takeTimes[0] || null;
+    const pillsPerDose = this.toFiniteOrNull(body?.pillsPerDose ?? body?.pills);
     const medication = {
       id: randomUUID(),
       name,
       dosage: body?.dosage || '',
       frequency: body?.frequency || 'As prescribed',
+      takeTime: takeTime || null,
+      takeTimes,
+      pillsPerDose,
       nextDoseAt: body?.nextDoseAt || null,
       active: body?.active !== false,
       takenCount: 0,
@@ -1332,9 +1367,6 @@ export class UsersController {
       adminId: body.adminId,
       adminIdUrl: body.adminIdUrl,
       adminIdName: body.adminIdName,
-      idPhoto: body.idPhoto,
-      idPhotoUrl: body.idPhotoUrl,
-      idName: body.idName,
       cv: body.cv,
       cvUrl: body.cvUrl,
       cvName: body.cvName,
@@ -1517,16 +1549,54 @@ export class UsersController {
     const hospitalServiceRows = hospitalTenantIds.length
       ? await db.hospitalService.findMany({
           where: { tenantId: { in: hospitalTenantIds } },
-          select: { tenantId: true, name: true },
+          select: {
+            tenantId: true,
+            name: true,
+            category: true,
+            description: true,
+            department: true,
+            availability: true,
+            equipment: true,
+            status: true,
+          },
         })
       : [];
     const servicesByTenant = new Map<string, string[]>();
+    const serviceDetailsByTenant = new Map<string, any[]>();
+    const serviceTokensByTenant = new Map<string, string[]>();
     hospitalServiceRows.forEach((row) => {
       const key = String(row.tenantId || '');
       if (!key) return;
       const list = servicesByTenant.get(key) || [];
       if (row.name) list.push(String(row.name));
       servicesByTenant.set(key, list);
+      const detailList = serviceDetailsByTenant.get(key) || [];
+      detailList.push({
+        name: row.name || null,
+        category: row.category || null,
+        availability: row.availability || null,
+        department: row.department || null,
+        status: row.status || null,
+        costMin: row.costMin ?? null,
+        costMax: row.costMax ?? null,
+      });
+      serviceDetailsByTenant.set(key, detailList);
+      const tokens = serviceTokensByTenant.get(key) || [];
+      const pushToken = (value?: string | null) => {
+        if (!value) return;
+        const text = String(value).trim();
+        if (!text) return;
+        tokens.push(text.toLowerCase());
+      };
+      pushToken(row.name);
+      pushToken(row.category);
+      pushToken(row.description);
+      pushToken(row.department);
+      pushToken(row.availability);
+      if (Array.isArray(row.equipment)) {
+        row.equipment.forEach((item: any) => pushToken(item));
+      }
+      serviceTokensByTenant.set(key, tokens);
     });
 
     const items = users
@@ -1610,14 +1680,21 @@ export class UsersController {
                 : Array.isArray(extras.specialties)
                   ? extras.specialties
                   : [],
+          serviceDetails:
+            role === 'HOSPITAL_ADMIN' && tenant?.id
+              ? serviceDetailsByTenant.get(String(tenant.id)) || []
+              : [],
         };
       })
       .filter(Boolean);
     const filteredItems = serviceFilter
       ? items.filter((item: any) => {
           if (item?.kind !== 'hospital') return false;
+          const tenantId = String(item?.tenantId || '');
           const list = Array.isArray(item?.services) ? item.services : [];
-          return list.some((entry: any) =>
+          const tokens = tenantId ? serviceTokensByTenant.get(tenantId) || [] : [];
+          const haystack = [...list, ...tokens];
+          return haystack.some((entry: any) =>
             String(entry || '').toLowerCase().includes(serviceFilter),
           );
         })

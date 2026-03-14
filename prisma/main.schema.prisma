@@ -198,6 +198,13 @@ model HospitalService {
   name        String
   description String?
   category    String?
+  availability String?
+  costMin     Decimal? @default(0)
+  costMax     Decimal? @default(0)
+  department  String?
+  doctors     Json?
+  equipment   Json?
+  status      String   @default("ACTIVE")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -205,6 +212,8 @@ model HospitalService {
 
   @@index([tenantId])
   @@index([name])
+  @@index([category])
+  @@index([status])
   @@map("hospital_services")
 }
 
@@ -350,6 +359,26 @@ model Shift {
   description        String?
   specifications     String?
   specialization     String?
+  department         String?
+  doctorId           String?
+  hospitalId         String?
+  shiftDate          String?
+  startTime          String?
+  endTime            String?
+  shiftType          String?
+  consultationDuration Int?   @default(0)
+  maxPatients        Int?     @default(0)
+  breakMinutes       Int?     @default(0)
+  bufferMinutes      Int?     @default(0)
+  hospitalBranch     String?
+  roomNumber         String?
+  consultationTypes  Json?
+  isAvailable        Boolean  @default(true)
+  walkInAllowed      Boolean  @default(false)
+  emergencySlotReserved Boolean @default(false)
+  repeatInterval     String?
+  repeatDays         Json?
+  slots              Json?
   requiredMedics     Int      @default(0)
   hours              Int      @default(0)
   payType            String?
@@ -376,6 +405,7 @@ model Shift {
 model Job {
   id                 String   @id @default(uuid())
   title              String
+  jobCategory        String?
   description        String?
   department         String
   specialization     String
@@ -383,23 +413,40 @@ model Job {
   scheduleType       String
   shiftPattern       String
   experienceLevel    String
+  educationLevel     String?
+  licenseBody        String?
+  experienceYears    Int?     @default(0)
   responsibilities   String
   qualifications     String
   requirements       String
   benefits           String
+  requiredDocuments  Json?
   contactEmail       String
   contactPhone       String
   applicationDeadline String
+  applicationMethod  String?
+  applicationLink    String?
+  maxApplicants      Int?     @default(0)
   startDate          String
   location           String
+  county             String?
+  city               String?
+  address            String?
   requiredMedics     Int      @default(0)
   hours              Int      @default(0)
   payType            String?
   payAmount          Decimal? @default(0)
+  payMin             Decimal? @default(0)
+  payMax             Decimal? @default(0)
   status             String   @default("OPEN")
   createdBy          String
+  employerId         String?
   employerType       String
   employerName       String
+  facilityType       String?
+  drugDispensingExperience String?
+  inventoryManagementExperience String?
+  pharmacySoftwareExperience String?
   applications       Json?
   cancellationReason String?
   cancelledAt        DateTime?
